@@ -1,194 +1,154 @@
-import { useEffect, useState } from 'react';
-import { socket } from './socket';
-import { Wifi, WifiOff, Activity, ShieldCheck, Zap, RefreshCw } from 'lucide-react';
+import { useState } from 'react';
+import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
+import { ToastProvider } from './context/ToastContext';
+import { GameStateProvider } from './context/GameStateContext';
+import { Navbar } from './components/common/Navbar';
+import { Modal } from './components/common/Modal';
+import { LandingPage } from './pages/LandingPage';
+import { CreateRoomPage } from './pages/CreateRoomPage';
+import { JoinRoomPage } from './pages/JoinRoomPage';
+import { LobbyPage } from './pages/LobbyPage';
+import { GameArenaPage } from './pages/GameArenaPage';
+import { RoundRecapPage } from './pages/RoundRecapPage';
+import { PodiumPage } from './pages/PodiumPage';
+import { ErrorReconnectPage } from './pages/ErrorReconnectPage';
+import { Eye, ChevronRight } from 'lucide-react';
+import { sounds } from './audio/soundEffects';
 
-export default function App() {
-  const [isConnected, setIsConnected] = useState<boolean>(socket.connected);
-  const [socketId, setSocketId] = useState<string | null>(socket.id || null);
-  const [latency, setLatency] = useState<number | null>(null);
-  const [lastPingTime, setLastPingTime] = useState<string>('Never');
-  const [backendHealth, setBackendHealth] = useState<'checking' | 'ok' | 'error'>('checking');
+function AppContent() {
+  const [isHowToPlayOpen, setIsHowToPlayOpen] = useState(false);
+  const [showDemoNav, setShowDemoNav] = useState(false);
+  const location = useLocation();
 
-  useEffect(() => {
-    function onConnect() {
-      setIsConnected(true);
-      setSocketId(socket.id || null);
-      measurePing();
-    }
-
-    function onDisconnect() {
-      setIsConnected(false);
-      setSocketId(null);
-    }
-
-    // Check backend health endpoint
-    fetch('/api/health')
-      .then((res) => {
-        if (res.ok) setBackendHealth('ok');
-        else setBackendHealth('error');
-      })
-      .catch(() => setBackendHealth('error'));
-
-    socket.on('connect', onConnect);
-    socket.on('disconnect', onDisconnect);
-
-    if (socket.connected) {
-      onConnect();
-    }
-
-    return () => {
-      socket.off('connect', onConnect);
-      socket.off('disconnect', onDisconnect);
-    };
-  }, []);
-
-  const measurePing = () => {
-    const start = Date.now();
-    fetch('/api/health')
-      .then(() => {
-        const ping = Date.now() - start;
-        setLatency(ping);
-        setLastPingTime(new Date().toLocaleTimeString());
-      })
-      .catch(() => {
-        setLatency(null);
-      });
-  };
+  const allScreens = [
+    { path: '/', label: '1. Landing' },
+    { path: '/create', label: '2. Create Room' },
+    { path: '/join', label: '3. Join Room' },
+    { path: '/lobby', label: '4. Lobby' },
+    { path: '/game', label: '5. Game Arena' },
+    { path: '/recap', label: '6. Round Recap' },
+    { path: '/podium', label: '7. Final Podium' },
+    { path: '/error?type=disconnected', label: '8. Reconnect' },
+  ];
 
   return (
-    <main className="min-h-screen flex flex-col items-center justify-center p-4 selection:bg-clash-cyan selection:text-black">
-      <div className="w-full max-w-lg space-y-6">
-        {/* Header Hero */}
-        <div className="text-center space-y-2">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-clash-cyan/10 border border-clash-cyan/20 text-clash-cyan text-xs font-semibold uppercase tracking-wider">
-            <Zap className="w-3.5 h-3.5" />
-            Phase 0 Verification
+    <div className="min-h-screen bg-clash-darkest text-slate-100 flex flex-col font-sans selection:bg-cyan-400 selection:text-slate-950">
+      {/* Top Navigation */}
+      <Navbar onOpenHowToPlay={() => setIsHowToPlayOpen(true)} />
+
+      {/* Main Viewport Router */}
+      <main className="flex-1">
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/create" element={<CreateRoomPage />} />
+          <Route path="/join" element={<JoinRoomPage />} />
+          <Route path="/lobby" element={<LobbyPage />} />
+          <Route path="/game" element={<GameArenaPage />} />
+          <Route path="/recap" element={<RoundRecapPage />} />
+          <Route path="/podium" element={<PodiumPage />} />
+          <Route path="/error" element={<ErrorReconnectPage />} />
+        </Routes>
+      </main>
+
+      {/* Global How to Play Modal */}
+      <Modal
+        isOpen={isHowToPlayOpen}
+        onClose={() => setIsHowToPlayOpen(false)}
+        title="Mind Clash — Battle Guide"
+        maxWidth="lg"
+      >
+        <div className="space-y-4 text-xs sm:text-sm text-slate-300">
+          <div className="p-3.5 rounded-2xl bg-slate-950/80 border border-cyan-500/20 space-y-1">
+            <h4 className="font-bold text-cyan-300 text-sm">Real-Time Synchronization</h4>
+            <p className="text-slate-400">
+              Every player views the exact same challenges with millisecond timestamp synchronization.
+              Rounds are server-authoritative to eliminate cheating or fabricated client scores.
+            </p>
           </div>
-          <h1 className="text-4xl sm:text-5xl font-black tracking-tight text-white">
-            Mind <span className="text-transparent bg-clip-text bg-gradient-to-r from-clash-cyan via-clash-purple to-clash-amber">Clash</span>
-          </h1>
-          <p className="text-slate-400 text-sm sm:text-base">
-            Real-time multiplayer cognitive arena architecture & networking testbed
-          </p>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="p-3 rounded-xl bg-slate-950/60 border border-white/5 space-y-1">
+              <strong className="text-white block">Speed Math</strong>
+              <p className="text-slate-400 text-xs">Solve arithmetic equations before the clock hits zero.</p>
+            </div>
+            <div className="p-3 rounded-xl bg-slate-950/60 border border-white/5 space-y-1">
+              <strong className="text-white block">Trivia Blitz</strong>
+              <p className="text-slate-400 text-xs">Fast answers grant up to 500 bonus points on top of base points.</p>
+            </div>
+            <div className="p-3 rounded-xl bg-slate-950/60 border border-white/5 space-y-1">
+              <strong className="text-white block">Memory Matrix</strong>
+              <p className="text-slate-400 text-xs">Recall the illuminated tile pattern accurately.</p>
+            </div>
+            <div className="p-3 rounded-xl bg-slate-950/60 border border-white/5 space-y-1">
+              <strong className="text-white block">Reaction Clash</strong>
+              <p className="text-slate-400 text-xs">Strike immediately when green appears. Avoid false starts!</p>
+            </div>
+          </div>
         </div>
+      </Modal>
 
-        {/* Live Network & Socket Status Card */}
-        <div className="glass-panel p-6 rounded-2xl shadow-2xl relative overflow-hidden space-y-5">
-          {/* Status Header */}
-          <div className="flex items-center justify-between pb-4 border-b border-white/5">
-            <div className="flex items-center gap-3">
-              <div
-                className={`p-2.5 rounded-xl ${
-                  isConnected
-                    ? 'bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30'
-                    : 'bg-rose-500/15 text-rose-400 ring-1 ring-rose-500/30'
-                }`}
-              >
-                {isConnected ? <Wifi className="w-5 h-5 animate-pulse" /> : <WifiOff className="w-5 h-5" />}
-              </div>
-              <div>
-                <h2 className="text-base font-bold text-white flex items-center gap-2">
-                  Socket.IO Real-Time Gateway
-                </h2>
-                <p className="text-xs text-slate-400">
-                  Authoritative WebSocket channel with auto-fallback
-                </p>
-              </div>
-            </div>
-
-            <span
-              id="socket-status-badge"
-              className={`px-3 py-1 text-xs font-bold rounded-full uppercase tracking-wider flex items-center gap-1.5 ${
-                isConnected
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 glow-cyan'
-                  : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-              }`}
-            >
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  isConnected ? 'bg-emerald-400 animate-ping' : 'bg-rose-400'
-                }`}
-              />
-              {isConnected ? 'Connected' : 'Disconnected'}
-            </span>
-          </div>
-
-          {/* Telemetry Grid */}
-          <div className="grid grid-cols-2 gap-3 text-xs">
-            <div className="glass-card p-3 rounded-xl space-y-1">
-              <span className="text-slate-400 font-medium">Socket ID</span>
-              <p className="font-mono text-slate-200 truncate font-semibold" title={socketId || 'None'}>
-                {socketId ? socketId : 'Connecting...'}
-              </p>
-            </div>
-
-            <div className="glass-card p-3 rounded-xl space-y-1">
-              <span className="text-slate-400 font-medium flex items-center gap-1">
-                <Activity className="w-3.5 h-3.5 text-clash-cyan" /> Latency Ping
+      {/* Floating Design System Navigator Pill (Allows rapid review of all 8 screens) */}
+      <aside aria-label="Design system screen switcher" className="fixed bottom-4 left-4 z-40">
+        {showDemoNav ? (
+          <div className="glass-panel p-3 rounded-2xl shadow-2xl border border-cyan-500/30 max-w-xs space-y-2 animate-pop motion-reduce:animate-none">
+            <div className="flex items-center justify-between pb-1 border-b border-white/10 text-xs font-bold text-white">
+              <span className="flex items-center gap-1.5 text-cyan-400">
+                <Eye className="w-3.5 h-3.5" /> Design System Views
               </span>
-              <p className="font-mono text-emerald-400 font-semibold">
-                {latency !== null ? `${latency} ms` : 'Measuring...'}
-              </p>
-            </div>
-
-            <div className="glass-card p-3 rounded-xl space-y-1">
-              <span className="text-slate-400 font-medium flex items-center gap-1">
-                <ShieldCheck className="w-3.5 h-3.5 text-clash-purple" /> REST API Health
-              </span>
-              <p
-                className={`font-semibold capitalize ${
-                  backendHealth === 'ok'
-                    ? 'text-emerald-400'
-                    : backendHealth === 'checking'
-                    ? 'text-amber-400'
-                    : 'text-rose-400'
-                }`}
+              <button
+                onClick={() => setShowDemoNav(false)}
+                className="text-slate-400 hover:text-white px-1.5 py-0.5 text-[10px] rounded bg-white/5"
               >
-                {backendHealth === 'ok' ? 'Healthy (200 OK)' : backendHealth}
-              </p>
+                Hide
+              </button>
             </div>
-
-            <div className="glass-card p-3 rounded-xl space-y-1">
-              <span className="text-slate-400 font-medium">Last Measured</span>
-              <p className="font-mono text-slate-300 font-semibold">{lastPingTime}</p>
-            </div>
-          </div>
-
-          {/* Action Row */}
-          <div className="pt-2 flex gap-3">
-            <button
-              id="refresh-ping-btn"
-              onClick={measurePing}
-              className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 active:scale-95 transition-all text-xs font-semibold text-slate-200 border border-white/10"
-            >
-              <RefreshCw className="w-3.5 h-3.5 text-clash-cyan" />
-              Test Connection Latency
-            </button>
-          </div>
-        </div>
-
-        {/* Phase 0 Checklist */}
-        <div className="glass-card p-4 rounded-xl border border-white/5 text-xs space-y-2">
-          <p className="font-semibold text-slate-300 flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-clash-cyan" />
-            Verified Architecture Components
-          </p>
-          <div className="grid grid-cols-2 gap-2 text-slate-400">
-            <div className="flex items-center gap-1.5">
-              <span className="text-emerald-400">✓</span> React 18 + Vite Frontend
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-emerald-400">✓</span> Express + Socket.IO Backend
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-emerald-400">✓</span> Shared TypeScript Contracts
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-emerald-400">✓</span> Tailwind CSS Arcade Palette
+            <div className="grid grid-cols-2 gap-1.5 text-[11px] font-semibold">
+              {allScreens.map((s) => (
+                <Link
+                  key={s.path}
+                  to={s.path}
+                  onClick={() => {
+                    sounds.playClick();
+                    setShowDemoNav(false);
+                  }}
+                  className={`px-2 py-1.5 rounded-lg truncate transition ${
+                    location.pathname === s.path.split('?')[0]
+                      ? 'bg-cyan-500 text-slate-950 font-bold'
+                      : 'bg-white/5 hover:bg-white/10 text-slate-300'
+                  }`}
+                >
+                  {s.label}
+                </Link>
+              ))}
             </div>
           </div>
-        </div>
-      </div>
-    </main>
+        ) : (
+          <button
+            onClick={() => {
+              sounds.playClick();
+              setShowDemoNav(true);
+            }}
+            className="flex items-center gap-2 px-3 py-2 rounded-full glass-panel border border-cyan-500/30 text-cyan-300 text-xs font-bold shadow-xl hover:bg-white/10 active:scale-95 transition"
+            title="Switch between the 8 Phase 2 screens"
+          >
+            <Eye className="w-3.5 h-3.5" />
+            <span>Screen Switcher (8 Views)</span>
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </aside>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <ToastProvider>
+        <GameStateProvider>
+          <AppContent />
+        </GameStateProvider>
+      </ToastProvider>
+    </BrowserRouter>
   );
 }
