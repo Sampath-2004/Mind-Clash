@@ -131,8 +131,10 @@ Copy-Item .env.example .env
 
 ## 🌐 Production Deployment
 
-Mind Clash is designed for single-port zero-CORS production hosting:
-- In production (`NODE_ENV=production`), Express automatically serves the pre-compiled `client/dist` static assets and handles single-page app (SPA) fallback routing.
-- Can be deployed directly to **Render**, **Railway**, **Fly.io**, or **Docker** using:
-  - Build command: `npm run build`
-  - Start command: `npm start`
+Mind Clash is designed for single-port zero-CORS unified production hosting. Full step-by-step instructions for **Render**, **Railway**, and **Docker** can be found in [DEPLOYMENT.md](./DEPLOYMENT.md).
+
+- **Unified Server**: Express automatically serves the compiled `client/dist` frontend and Socket.IO on the same port without cross-origin configuration issues.
+- **Single Instance Constraint**: Mind Clash maintains authoritative game state in process memory. Exactly one (1) backend instance must be run.
+- **Build command**: `npm run build`
+- **Start command**: `npm start`
+- **Health check path**: `/api/health`

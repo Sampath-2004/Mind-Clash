@@ -158,6 +158,7 @@ export const JoinRoomPage: React.FC = () => {
             )}
 
             <button
+              data-testid="join-room-submit-btn"
               type="submit"
               disabled={isSubmitting}
               className={`w-full py-4 rounded-2xl bg-gradient-to-r from-purple-600 to-cyan-500 hover:brightness-110 active:scale-98 text-white font-black text-sm uppercase tracking-wider shadow-xl shadow-purple-600/25 transition-all flex items-center justify-center gap-2 ${

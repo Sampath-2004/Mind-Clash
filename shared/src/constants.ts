@@ -7,7 +7,7 @@ export const MIN_PLAYERS_PER_ROOM = 2;
 export const MAX_PLAYERS_PER_ROOM = 10;
 export const DEFAULT_ROUND_COUNT = 5;
 export const MIN_ROUND_COUNT = 3;
-export const MAX_ROUND_COUNT = 10;
+export const MAX_ROUND_COUNT = 15;
 
 // Reconnect & Disconnect Grace Timers (ms)
 export const RECONNECT_GRACE_PERIOD_MS = 60_000; // 60 seconds
@@ -17,10 +17,11 @@ export const HOST_MIGRATION_GRACE_PERIOD_MS = 15_000; // 15 seconds
 export const GAME_START_COUNTDOWN_MS = 3_000; // 3, 2, 1, GO!
 export const ROUND_INTRO_COUNTDOWN_MS = 3_000; // "Round X: Mode Name"
 export const ROUND_RECAP_DURATION_MS = 5_000; // Score reveal + ranking
+export const DEFAULT_QUESTION_DURATION_MS = 15_000; // 15-second question rounds
 
 // Mode-Specific Timing Defaults (ms)
-export const TRIVIA_ROUND_DURATION_MS = 12_000;
-export const MATH_ROUND_DURATION_MS = 10_000;
+export const TRIVIA_ROUND_DURATION_MS = 15_000;
+export const MATH_ROUND_DURATION_MS = 15_000;
 export const MEMORY_REVEAL_DURATION_MS = 2_800;
 export const MEMORY_INPUT_DURATION_MS = 7_200;
 export const REACTION_MIN_DELAY_MS = 2_000;
@@ -33,12 +34,12 @@ export const NETWORK_LATENCY_BUFFER_MS = 350;
 // Scoring Constants
 export const SCORING = {
   TRIVIA: {
-    BASE_POINTS: 500,
-    MAX_SPEED_BONUS: 500,
+    BASE_POINTS: 100,
+    MAX_SPEED_BONUS: 50,
   },
   MATH: {
-    BASE_POINTS: 500,
-    MAX_SPEED_BONUS: 500,
+    BASE_POINTS: 100,
+    MAX_SPEED_BONUS: 50,
   },
   MEMORY: {
     BASE_POINTS: 400,

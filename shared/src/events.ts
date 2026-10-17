@@ -35,12 +35,23 @@ export interface SubmitMathPayload {
 }
 
 export interface SubmitMemoryPayload {
-  selectedIndices: number[];
+  selectedIndices?: number[];
+  sequence?: string[];
   clientTimeMs: number;
 }
 
 export interface SubmitReactionPayload {
   clientTimeMs: number;
+}
+
+export interface ReconnectResponseData {
+  room: RoomState;
+  playerId: string;
+  newSessionToken?: string;
+  activeChallenge?: ActiveChallengeClient;
+  remainingMs?: number;
+  roundRecap?: RoundRecapData;
+  podiumData?: GameOverPodiumData;
 }
 
 export interface ServerResponseAck<T = undefined> {
@@ -63,7 +74,7 @@ export interface ClientToServerEvents {
 
   reconnect_player: (
     payload: ReconnectPayload,
-    callback: (response: ServerResponseAck<{ room: RoomState; playerId: string }>) => void
+    callback: (response: ServerResponseAck<ReconnectResponseData>) => void
   ) => void;
 
   update_settings: (
@@ -98,7 +109,14 @@ export interface ClientToServerEvents {
     callback?: (response: ServerResponseAck) => void
   ) => void;
 
+  ping_clock: (
+    clientTime: number,
+    callback: (data: { clientTime: number; serverTime: number }) => void
+  ) => void;
+
   play_again: (callback?: (response: ServerResponseAck) => void) => void;
+
+  return_to_lobby: (callback?: (response: ServerResponseAck) => void) => void;
 
   leave_room: () => void;
 }
@@ -110,19 +128,22 @@ export interface ServerToClientEvents {
   player_left: (data: { playerId: string; newHostId?: string }) => void;
   player_disconnected: (playerId: string) => void;
   player_reconnected: (player: Player) => void;
-  game_starting: (data: { countdownMs: number }) => void;
+  game_starting: (data: { countdownMs: number; serverTime: number }) => void;
   round_intro: (data: {
     round: number;
     totalRounds: number;
     mode: GameMode;
     countdownMs: number;
+    serverTime: number;
   }) => void;
   round_started: (data: {
     round: number;
     totalRounds: number;
+    roundId: string;
     activeChallenge: ActiveChallengeClient;
     startTime: number;
     endTime: number;
+    serverTime: number;
   }) => void;
   submission_acknowledged: (data: { playerId: string }) => void;
   round_recap: (recap: RoundRecapData) => void;

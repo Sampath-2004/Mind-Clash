@@ -24,8 +24,21 @@ export class RoomManager {
   private socketToRoom = new Map<string, string>(); // socketId -> roomCode
   private sessionToPlayer = new Map<string, { roomCode: string; playerId: string }>(); // sessionToken -> player info
   private disconnectTimers = new Map<string, NodeJS.Timeout>(); // sessionToken -> timer
+  private gracePeriodMs: number = RECONNECT_GRACE_PERIOD_MS;
 
   constructor() {}
+
+  public setGracePeriodMs(ms: number): void {
+    this.gracePeriodMs = ms;
+  }
+
+  public getGracePeriodMs(): number {
+    return this.gracePeriodMs;
+  }
+
+  public resetGracePeriodMs(): void {
+    this.gracePeriodMs = RECONNECT_GRACE_PERIOD_MS;
+  }
 
   /**
    * Retrieves an active room by code.
@@ -93,6 +106,7 @@ export class RoomManager {
       totalRounds: DEFAULT_ROUND_COUNT,
       activeMode: 'trivia',
       settings: initialSettings,
+      lastActivityAt: Date.now(),
     };
 
     this.rooms.set(roomCode, room);
@@ -100,6 +114,20 @@ export class RoomManager {
     this.sessionToPlayer.set(sessionToken, { roomCode, playerId: socketId });
 
     return { room, player: hostPlayer, sessionToken };
+  }
+
+  /**
+   * Strips or redacts sensitive session tokens from player objects before broadcasting.
+   * Only the designated recipient can see their own session token; all other tokens are masked.
+   */
+  public sanitizeRoom(room: RoomState, recipientSessionToken?: string): RoomState {
+    return {
+      ...room,
+      players: room.players.map((p) => ({
+        ...p,
+        sessionToken: recipientSessionToken && p.sessionToken === recipientSessionToken ? p.sessionToken : '',
+      })),
+    };
   }
 
   /**
@@ -157,6 +185,7 @@ export class RoomManager {
     };
 
     room.players.push(newPlayer);
+    room.lastActivityAt = Date.now();
     this.socketToRoom.set(socketId, roomCode);
     this.sessionToPlayer.set(sessionToken, { roomCode, playerId: socketId });
 
@@ -165,17 +194,19 @@ export class RoomManager {
 
   /**
    * Reconnects an existing player using their session token.
+   * Rotates credentials, preserves authoritative scores, and transfers host authority safely.
    */
   public reconnectPlayer(
     newSocketId: string,
     rawInput: ReconnectInput
-  ): { room: RoomState; player: Player } {
+  ): { room: RoomState; player: Player; newSessionToken: string; oldSocketId?: string } {
     const input = reconnectSchema.parse(rawInput);
     const roomCode = input.roomCode.toUpperCase();
     const room = this.rooms.get(roomCode);
 
+    // Honest server restart & expired room handling
     if (!room) {
-      throw new Error(`Room "${roomCode}" does not exist`);
+      throw new Error('Room not found or server was restarted');
     }
 
     const player = room.players.find((p) => p.sessionToken === input.sessionToken);
@@ -190,24 +221,41 @@ export class RoomManager {
       this.disconnectTimers.delete(player.sessionToken);
     }
 
-    // Clean old socket mapping
-    this.socketToRoom.delete(player.id);
+    // Rotate opaque session token to invalidate prior session credential
+    const newSessionToken = crypto.randomUUID();
+    this.sessionToPlayer.delete(player.sessionToken);
+    player.sessionToken = newSessionToken;
 
-    // Update player socket ID and connectivity
+    // Clean old socket mapping
+    const oldSocketId = player.id;
+    this.socketToRoom.delete(oldSocketId);
+
+    // Update player socket ID, connectivity, and activity
     player.id = newSocketId;
     player.isConnected = true;
     player.disconnectedAt = null;
+    room.lastActivityAt = Date.now();
 
-    // If room host was disconnected, this player remains host or resumes host if room.hostId matches
-    if (room.hostId === player.id || player.isHost) {
-      room.hostId = newSocketId;
+    // Host authority handling:
+    // If another active player was already assigned host during absence, preserve new host
+    const otherConnectedHost = room.players.find(
+      (p) => p.isHost && p.isConnected && p.id !== player.id
+    );
+    if (otherConnectedHost) {
+      player.isHost = false;
+    } else if (
+      room.hostId === player.id ||
+      player.isHost ||
+      !room.players.some((p) => p.isHost && p.isConnected)
+    ) {
       player.isHost = true;
+      room.hostId = newSocketId;
     }
 
     this.socketToRoom.set(newSocketId, roomCode);
-    this.sessionToPlayer.set(player.sessionToken, { roomCode, playerId: newSocketId });
+    this.sessionToPlayer.set(newSessionToken, { roomCode, playerId: newSocketId });
 
-    return { room, player };
+    return { room, player, newSessionToken, oldSocketId };
   }
 
   /**
@@ -231,6 +279,7 @@ export class RoomManager {
     const [leavingPlayer] = room.players.splice(playerIndex, 1);
     this.socketToRoom.delete(socketId);
     this.sessionToPlayer.delete(leavingPlayer.sessionToken);
+    room.lastActivityAt = Date.now();
 
     // Clean disconnect timer if any
     const timer = this.disconnectTimers.get(leavingPlayer.sessionToken);
@@ -261,10 +310,13 @@ export class RoomManager {
 
   /**
    * Handles unexpected socket disconnection.
-   * Keeps player slot open for RECONNECT_GRACE_PERIOD_MS (60s).
+   * Keeps player slot open for configurable grace period (default 60s).
    * Migrates host if the host is disconnected.
    */
-  public handleDisconnect(socketId: string): {
+  public handleDisconnect(
+    socketId: string,
+    gracePeriodMs: number = this.gracePeriodMs
+  ): {
     room?: RoomState;
     player?: Player;
     newHostId?: string;
@@ -280,6 +332,7 @@ export class RoomManager {
 
     player.isConnected = false;
     player.disconnectedAt = Date.now();
+    room.lastActivityAt = Date.now();
 
     // If disconnected player was host, migrate host to next connected player so lobby doesn't hang
     let newHostId: string | undefined;
@@ -293,10 +346,16 @@ export class RoomManager {
       }
     }
 
+    // Clear prior timer for this session token if any
+    const priorTimer = this.disconnectTimers.get(player.sessionToken);
+    if (priorTimer) {
+      clearTimeout(priorTimer);
+    }
+
     // Schedule player purge after grace period
     const graceTimer = setTimeout(() => {
       this.purgeDisconnectedPlayer(roomCode, player.sessionToken);
-    }, RECONNECT_GRACE_PERIOD_MS);
+    }, gracePeriodMs);
 
     this.disconnectTimers.set(player.sessionToken, graceTimer);
 
@@ -316,6 +375,7 @@ export class RoomManager {
       const [purged] = room.players.splice(idx, 1);
       this.socketToRoom.delete(purged.id);
       this.sessionToPlayer.delete(sessionToken);
+      room.lastActivityAt = Date.now();
 
       // Destroy room if all players are gone
       if (room.players.length === 0) {
@@ -360,6 +420,13 @@ export class RoomManager {
     const [kickedPlayer] = room.players.splice(idx, 1);
     this.socketToRoom.delete(kickedPlayer.id);
     this.sessionToPlayer.delete(kickedPlayer.sessionToken);
+    room.lastActivityAt = Date.now();
+
+    const timer = this.disconnectTimers.get(kickedPlayer.sessionToken);
+    if (timer) {
+      clearTimeout(timer);
+      this.disconnectTimers.delete(kickedPlayer.sessionToken);
+    }
 
     return { room, kickedPlayer };
   }
@@ -395,19 +462,76 @@ export class RoomManager {
       room.settings.selectedModes = newSettings.selectedModes;
     }
 
+    room.lastActivityAt = Date.now();
     return room;
+  }
+
+  private sweepInterval: NodeJS.Timeout | null = null;
+
+  /**
+   * Starts periodic background sweep to prune inactive and abandoned rooms.
+   */
+  public startPeriodicSweep(intervalMs: number = 60_000, maxIdleMs: number = 15 * 60 * 1000): void {
+    if (this.sweepInterval) return;
+    this.sweepInterval = setInterval(() => {
+      this.purgeInactiveRooms(maxIdleMs);
+    }, intervalMs);
+    this.sweepInterval.unref();
+  }
+
+  /**
+   * Stops periodic background sweep.
+   */
+  public stopPeriodicSweep(): void {
+    if (this.sweepInterval) {
+      clearInterval(this.sweepInterval);
+      this.sweepInterval = null;
+    }
+  }
+
+  /**
+   * Sweeps and purges inactive/abandoned rooms to prevent memory leaks.
+   */
+  public purgeInactiveRooms(maxIdleMs: number = 15 * 60 * 1000): string[] {
+    const now = Date.now();
+    const purgedCodes: string[] = [];
+
+    for (const [code, room] of this.rooms.entries()) {
+      const allDisconnected = room.players.length === 0 || room.players.every((p) => !p.isConnected);
+      const isIdle = (now - (room.lastActivityAt || now)) >= maxIdleMs;
+
+      if (allDisconnected || isIdle) {
+        room.players.forEach((p) => {
+          const t = this.disconnectTimers.get(p.sessionToken);
+          if (t) {
+            clearTimeout(t);
+            this.disconnectTimers.delete(p.sessionToken);
+          }
+          this.sessionToPlayer.delete(p.sessionToken);
+          this.socketToRoom.delete(p.id);
+        });
+
+        this.rooms.delete(code);
+        purgedCodes.push(code);
+      }
+    }
+
+    return purgedCodes;
   }
 
   /**
    * Reset / cleanup for tests and graceful shutdown.
    */
   public clearAll() {
+    this.stopPeriodicSweep();
     this.disconnectTimers.forEach((timer) => clearTimeout(timer));
     this.disconnectTimers.clear();
     this.rooms.clear();
     this.socketToRoom.clear();
     this.sessionToPlayer.clear();
+    this.resetGracePeriodMs();
   }
 }
 
 export const roomManager = new RoomManager();
+

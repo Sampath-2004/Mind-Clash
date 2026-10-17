@@ -4,28 +4,80 @@ import {
   ServerToClientEvents,
   SocketData,
   MIN_PLAYERS_PER_ROOM,
+  createRoomSchema,
+  joinRoomSchema,
+  reconnectSchema,
+  updateSettingsSchema,
+  kickPlayerSchema,
+  submitTriviaSchema,
+  submitMathSchema,
+  submitMemorySchema,
+  submitReactionSchema,
+  pingClockSchema,
 } from '@mind-clash/shared';
 import { roomManager } from '../managers/RoomManager.js';
+import { GameEngine } from '../engine/GameEngine.js';
 import { checkRateLimit, cleanupSocketRateLimit } from '../middleware/rateLimiter.js';
+import { logger } from '../utils/logger.js';
+
+let gameEngine: GameEngine;
+
+export function initGameEngine(
+  io: Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>
+): GameEngine {
+  if (!gameEngine) {
+    gameEngine = new GameEngine(io);
+  } else {
+    gameEngine.setSocketServer(io);
+  }
+  return gameEngine;
+}
+
+export function getGameEngine(): GameEngine {
+  return gameEngine;
+}
 
 export function registerRoomHandlers(
   io: Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>,
   socket: Socket<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>
 ) {
-  // 1. Create Room
+  const engine = initGameEngine(io);
+
+  // 1. Clock Sync for Round Countdowns (General rate limit)
+  socket.on('ping_clock', (clientTime, callback) => {
+    if (!checkRateLimit(socket, 'general')) {
+      return;
+    }
+
+    const parseResult = pingClockSchema.safeParse(clientTime);
+    if (!parseResult.success) {
+      return;
+    }
+
+    callback?.({ clientTime: parseResult.data, serverTime: Date.now() });
+  });
+
+  // 2. Create Room (Room action rate limit)
   socket.on('create_room', (payload, callback) => {
-    if (!checkRateLimit(socket)) {
-      return callback?.({ success: false, error: 'Rate limit exceeded. Please wait a moment.' });
+    if (!checkRateLimit(socket, 'room_action')) {
+      return callback?.({ success: false, error: 'Too many requests. Please slow down.' });
+    }
+
+    const validation = createRoomSchema.safeParse(payload);
+    if (!validation.success) {
+      const err = validation.error.issues[0]?.message || 'Invalid room creation payload';
+      return callback?.({ success: false, error: err });
     }
 
     try {
-      const { room, player, sessionToken } = roomManager.createRoom(socket.id, payload);
+      const { room, player, sessionToken } = roomManager.createRoom(socket.id, validation.data);
 
-      // Join Socket.IO channel
       socket.join(room.roomCode);
       socket.data.roomCode = room.roomCode;
       socket.data.playerId = player.id;
       socket.data.sessionToken = sessionToken;
+
+      logger.info('Room created', { roomCode: room.roomCode, hostPlayerId: player.id });
 
       callback?.({
         success: true,
@@ -36,28 +88,35 @@ export function registerRoomHandlers(
         },
       });
 
-      // Send initial room snapshot
-      socket.emit('room_state_updated', room);
+      socket.emit('room_state_updated', roomManager.sanitizeRoom(room, sessionToken));
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create room';
+      logger.error('Error in create_room', err);
       callback?.({ success: false, error: message });
     }
   });
 
-  // 2. Join Room
+  // 3. Join Room (Room action rate limit)
   socket.on('join_room', (payload, callback) => {
-    if (!checkRateLimit(socket)) {
-      return callback?.({ success: false, error: 'Rate limit exceeded. Please wait a moment.' });
+    if (!checkRateLimit(socket, 'room_action')) {
+      return callback?.({ success: false, error: 'Too many requests. Please slow down.' });
+    }
+
+    const validation = joinRoomSchema.safeParse(payload);
+    if (!validation.success) {
+      const err = validation.error.issues[0]?.message || 'Invalid join room payload';
+      return callback?.({ success: false, error: err });
     }
 
     try {
-      const { room, player, sessionToken } = roomManager.joinRoom(socket.id, payload);
+      const { room, player, sessionToken } = roomManager.joinRoom(socket.id, validation.data);
 
-      // Join Socket.IO room channel
       socket.join(room.roomCode);
       socket.data.roomCode = room.roomCode;
       socket.data.playerId = player.id;
       socket.data.sessionToken = sessionToken;
+
+      logger.info('Player joined room', { roomCode: room.roomCode, playerId: player.id });
 
       callback?.({
         success: true,
@@ -68,50 +127,82 @@ export function registerRoomHandlers(
         },
       });
 
-      // Broadcast join event and full updated state to all in room
-      io.to(room.roomCode).emit('player_joined', player);
-      io.to(room.roomCode).emit('room_state_updated', room);
+      io.to(room.roomCode).emit('player_joined', { ...player, sessionToken: '' });
+      io.to(room.roomCode).emit('room_state_updated', roomManager.sanitizeRoom(room));
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to join room';
+      logger.error('Error in join_room', err);
       callback?.({ success: false, error: message });
     }
   });
 
-  // 3. Reconnect Player
+  // 4. Reconnect Player (Room action rate limit)
   socket.on('reconnect_player', (payload, callback) => {
-    if (!checkRateLimit(socket)) {
-      return callback?.({ success: false, error: 'Rate limit exceeded.' });
+    if (!checkRateLimit(socket, 'room_action')) {
+      return callback?.({ success: false, error: 'Too many requests. Please slow down.' });
+    }
+
+    const validation = reconnectSchema.safeParse(payload);
+    if (!validation.success) {
+      const err = validation.error.issues[0]?.message || 'Invalid reconnect credentials';
+      return callback?.({ success: false, error: err });
     }
 
     try {
-      const { room, player } = roomManager.reconnectPlayer(socket.id, payload);
+      const { room, player, newSessionToken, oldSocketId } = roomManager.reconnectPlayer(
+        socket.id,
+        validation.data
+      );
+
+      if (oldSocketId) {
+        engine.updatePlayerSocketId(room.roomCode, oldSocketId, socket.id);
+      }
+      const snapshot = engine.getReconnectionSnapshot(room);
 
       socket.join(room.roomCode);
       socket.data.roomCode = room.roomCode;
       socket.data.playerId = player.id;
-      socket.data.sessionToken = player.sessionToken;
+      socket.data.sessionToken = newSessionToken;
+
+      logger.info('Player reconnected', { roomCode: room.roomCode, playerId: player.id });
 
       callback?.({
         success: true,
         data: {
-          room,
+          room: roomManager.sanitizeRoom(room, newSessionToken),
           playerId: player.id,
+          newSessionToken,
+          activeChallenge: snapshot.activeChallenge,
+          remainingMs: snapshot.remainingMs,
+          roundRecap: snapshot.roundRecap,
+          podiumData: snapshot.podiumData,
         },
       });
 
-      io.to(room.roomCode).emit('player_reconnected', player);
-      io.to(room.roomCode).emit('room_state_updated', room);
+      io.to(room.roomCode).emit('player_reconnected', { ...player, sessionToken: '' });
+      io.to(room.roomCode).emit('room_state_updated', roomManager.sanitizeRoom(room));
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Reconnection failed';
+      logger.error('Error in reconnect_player', err);
       callback?.({ success: false, error: message });
     }
   });
 
-  // 4. Update Settings (Host Only)
+  // 5. Update Settings (Host Only)
   socket.on('update_settings', (payload, callback) => {
+    if (!checkRateLimit(socket, 'room_action')) {
+      return callback?.({ success: false, error: 'Too many requests. Please slow down.' });
+    }
+
+    const validation = updateSettingsSchema.safeParse(payload);
+    if (!validation.success) {
+      const err = validation.error.issues[0]?.message || 'Invalid settings payload';
+      return callback?.({ success: false, error: err });
+    }
+
     try {
-      const room = roomManager.updateSettings(socket.id, payload);
-      io.to(room.roomCode).emit('room_state_updated', room);
+      const room = roomManager.updateSettings(socket.id, validation.data);
+      io.to(room.roomCode).emit('room_state_updated', roomManager.sanitizeRoom(room));
       callback?.({ success: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not update settings';
@@ -119,12 +210,21 @@ export function registerRoomHandlers(
     }
   });
 
-  // 5. Kick Player (Host Only)
+  // 6. Kick Player (Host Only)
   socket.on('kick_player', (payload, callback) => {
-    try {
-      const { room, kickedPlayer } = roomManager.kickPlayer(socket.id, payload);
+    if (!checkRateLimit(socket, 'room_action')) {
+      return callback?.({ success: false, error: 'Too many requests. Please slow down.' });
+    }
 
-      // Notify kicked player socket
+    const validation = kickPlayerSchema.safeParse(payload);
+    if (!validation.success) {
+      const err = validation.error.issues[0]?.message || 'Invalid kick payload';
+      return callback?.({ success: false, error: err });
+    }
+
+    try {
+      const { room, kickedPlayer } = roomManager.kickPlayer(socket.id, validation.data);
+
       const kickedSocket = io.sockets.sockets.get(kickedPlayer.id);
       if (kickedSocket) {
         kickedSocket.emit('kicked', { reason: 'You were removed by the host' });
@@ -132,7 +232,7 @@ export function registerRoomHandlers(
       }
 
       io.to(room.roomCode).emit('player_left', { playerId: kickedPlayer.id });
-      io.to(room.roomCode).emit('room_state_updated', room);
+      io.to(room.roomCode).emit('room_state_updated', roomManager.sanitizeRoom(room));
       callback?.({ success: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to kick player';
@@ -140,26 +240,23 @@ export function registerRoomHandlers(
     }
   });
 
-  // 6. Start Game (Host Only)
+  // 7. Start Game (Host Only)
   socket.on('start_game', (callback) => {
+    if (!checkRateLimit(socket, 'room_action')) {
+      return callback?.({ success: false, error: 'Too many requests. Please slow down.' });
+    }
+
     try {
       const room = roomManager.getRoomBySocketId(socket.id);
-      if (!room) {
-        throw new Error('Room not found');
-      }
+      if (!room) throw new Error('Room not found');
+      if (room.hostId !== socket.id) throw new Error('Only the host can start the game');
 
-      if (room.hostId !== socket.id) {
-        throw new Error('Only the host can start the game');
-      }
-
-      const connectedPlayers = room.players.filter((p) => p.isConnected);
-      if (connectedPlayers.length < MIN_PLAYERS_PER_ROOM) {
+      const connected = room.players.filter((p) => p.isConnected);
+      if (connected.length < MIN_PLAYERS_PER_ROOM) {
         throw new Error(`At least ${MIN_PLAYERS_PER_ROOM} players required to start the match`);
       }
 
-      room.status = 'COUNTDOWN';
-      io.to(room.roomCode).emit('room_state_updated', room);
-      io.to(room.roomCode).emit('game_starting', { countdownMs: 3000 });
+      engine.startGame(room);
       callback?.({ success: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not start game';
@@ -167,19 +264,174 @@ export function registerRoomHandlers(
     }
   });
 
-  // 7. Explicit Leave Room
-  socket.on('leave_room', () => {
-    const { room, player, newHostId, roomDestroyed } = roomManager.leaveRoom(socket.id);
-    socket.leave(socket.data.roomCode || '');
-    socket.data.roomCode = undefined;
+  // 8. Submit Trivia Answer (Gameplay action rate limit + strictly server-identified socket.id)
+  socket.on('submit_trivia_answer', (payload, callback) => {
+    if (!checkRateLimit(socket, 'gameplay_action')) {
+      return callback?.({ success: false, error: 'Submission rate limit exceeded.' });
+    }
 
-    if (!roomDestroyed && room && player) {
-      io.to(room.roomCode).emit('player_left', { playerId: player.id, newHostId });
-      io.to(room.roomCode).emit('room_state_updated', room);
+    const validation = submitTriviaSchema.safeParse(payload);
+    if (!validation.success) {
+      return callback?.({ success: false, error: 'Invalid submission payload' });
+    }
+
+    try {
+      const room = roomManager.getRoomBySocketId(socket.id);
+      if (!room) throw new Error('Player not in an active room');
+
+      const res = engine.submitAnswer(room, socket.id, {
+        answer: validation.data.answerIndex,
+        clientTimeMs: validation.data.clientTimeMs,
+      });
+
+      if (!res.success) throw new Error(res.error);
+      callback?.({ success: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Invalid submission';
+      callback?.({ success: false, error: message });
     }
   });
 
-  // 8. Disconnect Handler
+  // 9. Submit Math Answer (Gameplay action rate limit + strictly server-identified socket.id)
+  socket.on('submit_math_answer', (payload, callback) => {
+    if (!checkRateLimit(socket, 'gameplay_action')) {
+      return callback?.({ success: false, error: 'Submission rate limit exceeded.' });
+    }
+
+    const validation = submitMathSchema.safeParse(payload);
+    if (!validation.success) {
+      return callback?.({ success: false, error: 'Invalid submission payload' });
+    }
+
+    try {
+      const room = roomManager.getRoomBySocketId(socket.id);
+      if (!room) throw new Error('Player not in an active room');
+
+      const res = engine.submitAnswer(room, socket.id, {
+        answer: validation.data.answer,
+        clientTimeMs: validation.data.clientTimeMs,
+      });
+
+      if (!res.success) throw new Error(res.error);
+      callback?.({ success: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Invalid submission';
+      callback?.({ success: false, error: message });
+    }
+  });
+
+  // 10. Submit Memory Tiles (Gameplay action rate limit + strictly server-identified socket.id)
+  socket.on('submit_memory_tiles', (payload, callback) => {
+    if (!checkRateLimit(socket, 'gameplay_action')) {
+      return callback?.({ success: false, error: 'Submission rate limit exceeded.' });
+    }
+
+    const validation = submitMemorySchema.safeParse(payload);
+    if (!validation.success) {
+      return callback?.({ success: false, error: 'Invalid submission payload' });
+    }
+
+    try {
+      const room = roomManager.getRoomBySocketId(socket.id);
+      if (!room) throw new Error('Player not in an active room');
+
+      const res = engine.submitAnswer(room, socket.id, {
+        selectedIndices: validation.data.selectedIndices,
+        sequence: validation.data.sequence,
+        clientTimeMs: validation.data.clientTimeMs,
+      });
+
+      if (!res.success) throw new Error(res.error);
+      callback?.({ success: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Invalid submission';
+      callback?.({ success: false, error: message });
+    }
+  });
+
+  // 11. Submit Reaction Click (Gameplay action rate limit + strictly server-identified socket.id)
+  socket.on('submit_reaction_click', (payload, callback) => {
+    if (!checkRateLimit(socket, 'gameplay_action')) {
+      return callback?.({ success: false, error: 'Submission rate limit exceeded.' });
+    }
+
+    const validation = submitReactionSchema.safeParse(payload);
+    if (!validation.success) {
+      return callback?.({ success: false, error: 'Invalid submission payload' });
+    }
+
+    try {
+      const room = roomManager.getRoomBySocketId(socket.id);
+      if (!room) throw new Error('Player not in an active room');
+
+      const res = engine.submitAnswer(room, socket.id, {
+        clientTimeMs: validation.data.clientTimeMs,
+      });
+
+      if (!res.success) throw new Error(res.error);
+      callback?.({ success: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Invalid submission';
+      callback?.({ success: false, error: message });
+    }
+  });
+
+  // 12. Play Again (Rematch - Host Only)
+  socket.on('play_again', (callback) => {
+    if (!checkRateLimit(socket, 'room_action')) {
+      return callback?.({ success: false, error: 'Too many requests. Please slow down.' });
+    }
+
+    try {
+      const room = roomManager.getRoomBySocketId(socket.id);
+      if (!room) throw new Error('Room not found');
+      if (room.hostId !== socket.id) throw new Error('Only the host can initiate a rematch');
+
+      engine.playAgain(room);
+      callback?.({ success: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not restart match';
+      callback?.({ success: false, error: message });
+    }
+  });
+
+  // 13. Return to Lobby (Host Only)
+  socket.on('return_to_lobby', (callback) => {
+    if (!checkRateLimit(socket, 'room_action')) {
+      return callback?.({ success: false, error: 'Too many requests. Please slow down.' });
+    }
+
+    try {
+      const room = roomManager.getRoomBySocketId(socket.id);
+      if (!room) throw new Error('Room not found');
+      if (room.hostId !== socket.id) throw new Error('Only the host can return to lobby');
+
+      engine.returnToLobby(room);
+      callback?.({ success: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not return to lobby';
+      callback?.({ success: false, error: message });
+    }
+  });
+
+  // 14. Explicit Leave Room
+  socket.on('leave_room', () => {
+    const roomCode = socket.data.roomCode;
+    const { room, player, newHostId, roomDestroyed } = roomManager.leaveRoom(socket.id);
+    if (roomCode) {
+      socket.leave(roomCode);
+    }
+    socket.data.roomCode = undefined;
+
+    if (roomDestroyed && roomCode) {
+      engine.cleanRoom(roomCode);
+    } else if (room && player) {
+      io.to(room.roomCode).emit('player_left', { playerId: player.id, newHostId });
+      io.to(room.roomCode).emit('room_state_updated', roomManager.sanitizeRoom(room));
+    }
+  });
+
+  // 15. Disconnect Handler
   socket.on('disconnect', () => {
     cleanupSocketRateLimit(socket.id);
 
@@ -187,7 +439,7 @@ export function registerRoomHandlers(
     if (room && player) {
       io.to(room.roomCode).emit('player_disconnected', player.id);
       if (newHostId) {
-        io.to(room.roomCode).emit('room_state_updated', room);
+        io.to(room.roomCode).emit('room_state_updated', roomManager.sanitizeRoom(room));
       }
     }
   });

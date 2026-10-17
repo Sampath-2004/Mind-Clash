@@ -46,6 +46,7 @@ export interface TriviaQuestionClient {
 
 export interface TriviaQuestionServer extends TriviaQuestionClient {
   correctIndex: number;
+  explanation?: string;
 }
 
 export interface MathQuestionClient {
@@ -59,26 +60,40 @@ export interface MathQuestionServer extends MathQuestionClient {
   correctAnswer: number;
 }
 
+export interface MemorySymbol {
+  id: string; // e.g. 'star', 'diamond', 'flame', 'bolt', 'shield', 'moon'
+  label: string; // Textual name for accessibility: 'Star', 'Diamond', 'Flame', etc.
+  icon: string; // Emoji / shape identifier: '⭐', '💎', '🔥', '⚡', '🛡️', '🌙'
+  colorClass: string;
+}
+
 export interface MemoryChallengeClient {
   id: string;
-  gridSize: number; // e.g. 3 for 3x3 (9 tiles) or 4 for 4x4 (16 tiles)
-  pattern: number[]; // Indices revealed during reveal phase
-  revealDurationMs: number;
-  inputDurationMs: number;
+  symbols: MemorySymbol[]; // The symbol palette for reproduction
+  sequence: string[]; // Symbol IDs to memorize in order during viewing period
+  viewingDurationMs: number; // Server-controlled viewing period in ms
+  inputDurationMs: number; // Reproduction time window
+  viewingEndTime: number; // Authoritative server timestamp when viewing ends and input unlocks
+  gridSize?: number; // Backward compatibility
+  pattern?: number[]; // Backward compatibility
+  revealDurationMs?: number; // Backward compatibility
 }
 
 export interface MemoryChallengeServer extends MemoryChallengeClient {
-  solution: number[];
+  solution: number[]; // Backward compatibility
+  solutionSequence: string[]; // Authoritative ordered symbol IDs
 }
 
 export interface ReactionChallengeClient {
   id: string;
-  waitDelayMs: number; // Scheduled delay before screen changes
+  waitDelayMs: number; // Scheduled delay before target activation
+  targetActivationTime: number; // Synchronized server timestamp when target activates
   timeoutMs: number;
+  networkNotice: string; // Latency fairness disclosure
 }
 
 export interface ReactionChallengeServer extends ReactionChallengeClient {
-  triggerTimestamp: number; // Server timestamp when green screen triggers
+  triggerTimestamp: number; // Server timestamp when target activates
 }
 
 export type ActiveChallengeClient =
@@ -106,8 +121,13 @@ export interface RoundRecapData {
   mode: GameMode;
   results: PlayerRoundResult[];
   triviaRevealIndex?: number;
+  triviaCorrectText?: string;
   mathCorrectAnswer?: number;
   memorySolution?: number[];
+  memorySequence?: string[];
+  reactionFastestMs?: number;
+  networkNotice?: string;
+  explanation?: string;
 }
 
 export interface FinalGameAccolade {
@@ -133,6 +153,9 @@ export interface RoomState {
   totalRounds: number;
   activeMode: GameMode | null;
   settings: RoomSettings;
+  roundId?: string | null;
   roundStartTime?: number | null;
   roundEndTime?: number | null;
+  serverTime?: number;
+  lastActivityAt?: number;
 }

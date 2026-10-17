@@ -32,7 +32,11 @@ export const RoomCodeDisplay: React.FC<RoomCodeDisplayProps> = ({
   const letters = roomCode.split('');
 
   return (
-    <div className="flex flex-col items-center gap-3">
+    <div
+      data-testid="room-code-display"
+      data-room-code={roomCode}
+      className="flex flex-col items-center gap-3"
+    >
       <span className="text-xs uppercase tracking-widest text-slate-400 font-bold">
         Room Code
       </span>

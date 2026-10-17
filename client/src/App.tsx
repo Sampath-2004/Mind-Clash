@@ -1,7 +1,7 @@
-import { useState } from 'react';
-import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Link, useLocation, useNavigate } from 'react-router-dom';
 import { ToastProvider } from './context/ToastContext';
-import { GameStateProvider } from './context/GameStateContext';
+import { GameStateProvider, useGame } from './context/GameStateContext';
 import { Navbar } from './components/common/Navbar';
 import { Modal } from './components/common/Modal';
 import { LandingPage } from './pages/LandingPage';
@@ -12,13 +12,33 @@ import { GameArenaPage } from './pages/GameArenaPage';
 import { RoundRecapPage } from './pages/RoundRecapPage';
 import { PodiumPage } from './pages/PodiumPage';
 import { ErrorReconnectPage } from './pages/ErrorReconnectPage';
-import { Eye, ChevronRight } from 'lucide-react';
+import { Eye, ChevronRight, RefreshCw, AlertTriangle } from 'lucide-react';
 import { sounds } from './audio/soundEffects';
 
 function AppContent() {
   const [isHowToPlayOpen, setIsHowToPlayOpen] = useState(false);
   const [showDemoNav, setShowDemoNav] = useState(false);
   const location = useLocation();
+  const navigate = useNavigate();
+  const { isReconnecting, serverRestartNotice, clearServerRestartNotice, currentRoom } = useGame();
+
+  // Auto-route on successful reconnection from Landing or Error pages
+  useEffect(() => {
+    if (currentRoom) {
+      const path = location.pathname;
+      if (path === '/' || path === '/error') {
+        if (currentRoom.status === 'LOBBY') {
+          navigate('/lobby');
+        } else if (currentRoom.status === 'ROUND_ACTIVE' || currentRoom.status === 'COUNTDOWN') {
+          navigate('/game');
+        } else if (currentRoom.status === 'ROUND_RECAP') {
+          navigate('/recap');
+        } else if (currentRoom.status === 'GAME_OVER') {
+          navigate('/podium');
+        }
+      }
+    }
+  }, [currentRoom?.status, location.pathname, navigate]);
 
   const allScreens = [
     { path: '/', label: '1. Landing' },
@@ -32,7 +52,68 @@ function AppContent() {
   ];
 
   return (
-    <div className="min-h-screen bg-clash-darkest text-slate-100 flex flex-col font-sans selection:bg-cyan-400 selection:text-slate-950">
+    <div className="min-h-screen bg-clash-darkest text-slate-100 flex flex-col font-sans selection:bg-cyan-400 selection:text-slate-950 relative">
+      {/* Non-blocking Reconnecting Indicator */}
+      {isReconnecting && (
+        <aside
+          aria-live="polite"
+          aria-label="Reconnection status"
+          className="fixed top-20 right-4 z-50 flex items-center gap-2.5 px-4 py-2 rounded-2xl bg-slate-900/90 border border-amber-500/40 text-amber-300 text-xs font-bold backdrop-blur-md shadow-2xl shadow-amber-500/10 animate-fade-in motion-reduce:animate-none"
+        >
+          <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />
+          <span>Reconnecting to clash session...</span>
+        </aside>
+      )}
+
+      {/* Honest Server Restart / Process Reset Modal */}
+      <Modal
+        isOpen={!!serverRestartNotice}
+        onClose={clearServerRestartNotice}
+        title="Session Notice: Server Process Restarted"
+        maxWidth="md"
+      >
+        <div className="space-y-4 text-xs sm:text-sm text-slate-300">
+          <div className="p-3.5 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-bold text-rose-300">In-Memory Rooms Reset</p>
+              <p className="text-slate-300 leading-relaxed text-xs">
+                {serverRestartNotice}
+              </p>
+            </div>
+          </div>
+          <p className="text-slate-400 text-xs leading-relaxed">
+            Mind Clash is an ultra-low latency, in-memory multiplayer clash engine. In-memory games cannot survive server process restarts without external database persistence.
+          </p>
+          <div className="flex flex-col sm:flex-row gap-2 pt-2">
+            <button
+              onClick={() => {
+                clearServerRestartNotice();
+                navigate('/create');
+              }}
+              className="flex-1 py-2.5 px-3 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs hover:brightness-110 active:scale-98 transition text-center"
+            >
+              Create New Room
+            </button>
+            <button
+              onClick={() => {
+                clearServerRestartNotice();
+                navigate('/join');
+              }}
+              className="flex-1 py-2.5 px-3 rounded-xl bg-white/10 text-white font-bold text-xs hover:bg-white/20 active:scale-98 transition text-center"
+            >
+              Join Room
+            </button>
+            <button
+              onClick={clearServerRestartNotice}
+              className="py-2.5 px-3 rounded-xl bg-slate-800 text-slate-300 font-semibold text-xs hover:text-white transition text-center"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      </Modal>
+
       {/* Top Navigation */}
       <Navbar onOpenHowToPlay={() => setIsHowToPlayOpen(true)} />
 

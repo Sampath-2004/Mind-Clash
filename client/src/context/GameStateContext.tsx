@@ -12,6 +12,9 @@ import { sounds } from '../audio/soundEffects';
 
 export interface GameContextValue {
   isConnected: boolean;
+  isReconnecting: boolean;
+  serverRestartNotice: string | null;
+  clearServerRestartNotice: () => void;
   socketId: string | null;
   currentRoom: RoomState | null;
   currentPlayer: Player | null;
@@ -28,6 +31,13 @@ export interface GameContextValue {
   startGame: () => Promise<{ success: boolean; error?: string }>;
   kickPlayer: (targetPlayerId: string) => Promise<{ success: boolean; error?: string }>;
   updateSettings: (settings: Partial<RoomSettings>) => Promise<{ success: boolean; error?: string }>;
+  submitTrivia: (answerIndex: number) => Promise<{ success: boolean; error?: string }>;
+  submitMath: (answer: number) => Promise<{ success: boolean; error?: string }>;
+  submitMemory: (input: number[] | string[]) => Promise<{ success: boolean; error?: string }>;
+  submitReaction: () => Promise<{ success: boolean; error?: string }>;
+  playAgain: () => Promise<{ success: boolean; error?: string }>;
+  returnToLobby: () => Promise<{ success: boolean; error?: string }>;
+  clockOffsetMs: number;
   // Demo State Setters (for UI isolated testing)
   setCurrentRoom: React.Dispatch<React.SetStateAction<RoomState | null>>;
   setCurrentPlayer: React.Dispatch<React.SetStateAction<Player | null>>;
@@ -52,6 +62,8 @@ export const AVATAR_OPTIONS = [
 
 export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isConnected, setIsConnected] = useState<boolean>(socket.connected);
+  const [isReconnecting, setIsReconnecting] = useState<boolean>(false);
+  const [serverRestartNotice, setServerRestartNotice] = useState<string | null>(null);
   const [socketId, setSocketId] = useState<string | null>(socket.id || null);
   const [currentRoom, setCurrentRoom] = useState<RoomState | null>(null);
   const [currentPlayer, setCurrentPlayer] = useState<Player | null>(null);
@@ -59,26 +71,72 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [roundRecap, setRoundRecap] = useState<RoundRecapData | null>(null);
   const [podiumData, setPodiumData] = useState<GameOverPodiumData | null>(null);
   const [isMuted, setIsMuted] = useState<boolean>(sounds.getMuted());
+  const [clockOffsetMs, setClockOffsetMs] = useState<number>(0);
+
+  const clearServerRestartNotice = useCallback(() => {
+    setServerRestartNotice(null);
+  }, []);
 
   // Socket Lifecycle Listeners
   useEffect(() => {
+    // Clean up any legacy localStorage items
+    localStorage.removeItem('mind_clash_room_code');
+    localStorage.removeItem('mind_clash_session_token');
+    localStorage.removeItem('mind_clash_player_id');
+
     function onConnect() {
       setIsConnected(true);
+      setIsReconnecting(false);
       setSocketId(socket.id || null);
 
-      // Attempt automatic session recovery if stored in localStorage
-      const savedCode = localStorage.getItem('mind_clash_room_code');
-      const savedToken = localStorage.getItem('mind_clash_session_token');
+      // Ping clock for offset estimation
+      const t0 = Date.now();
+      socket.emit('ping_clock', t0, (data) => {
+        const t1 = Date.now();
+        const rtt = t1 - t0;
+        const estimatedServerTime = data.serverTime + rtt / 2;
+        setClockOffsetMs(estimatedServerTime - t1);
+      });
+
+      // Attempt automatic session recovery if stored in sessionStorage
+      const savedCode = sessionStorage.getItem('mind_clash_room_code');
+      const savedToken = sessionStorage.getItem('mind_clash_session_token');
       if (savedCode && savedToken) {
+        setIsReconnecting(true);
         socket.emit('reconnect_player', { roomCode: savedCode, sessionToken: savedToken }, (res) => {
+          setIsReconnecting(false);
           if (res.success && res.data) {
+            if (res.data.newSessionToken) {
+              sessionStorage.setItem('mind_clash_session_token', res.data.newSessionToken);
+            }
+            sessionStorage.setItem('mind_clash_player_id', res.data.playerId);
             setCurrentRoom(res.data.room);
-            const myPlayer = res.data.room.players.find((p) => p.id === socket.id);
+            const myPlayer = res.data.room.players.find(
+              (p) => p.id === res.data!.playerId || p.id === socket.id
+            );
             if (myPlayer) setCurrentPlayer(myPlayer);
+
+            // Hydrate complete current-state snapshot
+            if (res.data.activeChallenge) {
+              setActiveChallenge(res.data.activeChallenge);
+            }
+            if (res.data.roundRecap) {
+              setRoundRecap(res.data.roundRecap);
+            }
+            if (res.data.podiumData) {
+              setPodiumData(res.data.podiumData);
+            }
           } else {
-            // Expired or invalid session
-            localStorage.removeItem('mind_clash_room_code');
-            localStorage.removeItem('mind_clash_session_token');
+            // Expired, invalid session, or server restart
+            sessionStorage.removeItem('mind_clash_room_code');
+            sessionStorage.removeItem('mind_clash_session_token');
+            sessionStorage.removeItem('mind_clash_player_id');
+
+            if (res.error?.includes('server was restarted') || res.error?.includes('does not exist')) {
+              setServerRestartNotice(
+                'The active clash session could not be recovered. The server process was restarted or the room expired, clearing in-memory rooms. Please start or join a new clash.'
+              );
+            }
           }
         });
       }
@@ -87,13 +145,23 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     function onDisconnect() {
       setIsConnected(false);
       setSocketId(null);
+      const savedToken = sessionStorage.getItem('mind_clash_session_token');
+      if (savedToken) {
+        setIsReconnecting(true);
+      }
     }
 
     function onRoomStateUpdated(updatedRoom: RoomState) {
       setCurrentRoom(updatedRoom);
-      // Synchronize current player instance
-      const myToken = localStorage.getItem('mind_clash_session_token');
-      const me = updatedRoom.players.find((p) => p.id === socket.id || (myToken && p.sessionToken === myToken));
+      if (updatedRoom.status === 'LOBBY') {
+        setActiveChallenge(null);
+        setRoundRecap(null);
+        setPodiumData(null);
+      }
+      const savedPlayerId = sessionStorage.getItem('mind_clash_player_id');
+      const me = updatedRoom.players.find(
+        (p) => p.id === socket.id || (savedPlayerId && p.id === savedPlayerId)
+      );
       if (me) {
         setCurrentPlayer(me);
       }
@@ -111,10 +179,37 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       sounds.playSuccess();
     }
 
+    function onRoundStarted(data: {
+      round: number;
+      totalRounds: number;
+      roundId: string;
+      activeChallenge: ActiveChallengeClient;
+      startTime: number;
+      endTime: number;
+      serverTime: number;
+    }) {
+      setActiveChallenge(data.activeChallenge);
+      setRoundRecap(null);
+      sounds.playClick();
+      const clientNow = Date.now();
+      setClockOffsetMs(data.serverTime - clientNow);
+    }
+
+    function onRoundRecap(recap: RoundRecapData) {
+      setRoundRecap(recap);
+      sounds.playSuccess();
+    }
+
+    function onGameOver(podium: GameOverPodiumData) {
+      setPodiumData(podium);
+      sounds.playVictoryFanfare();
+    }
+
     function onKicked(data: { reason: string }) {
       sounds.playError();
-      localStorage.removeItem('mind_clash_room_code');
-      localStorage.removeItem('mind_clash_session_token');
+      sessionStorage.removeItem('mind_clash_room_code');
+      sessionStorage.removeItem('mind_clash_session_token');
+      sessionStorage.removeItem('mind_clash_player_id');
       setCurrentRoom(null);
       setCurrentPlayer(null);
       window.location.href = `/error?type=kicked&reason=${encodeURIComponent(data.reason)}`;
@@ -126,6 +221,9 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     socket.on('player_joined', onPlayerJoined);
     socket.on('player_left', onPlayerLeft);
     socket.on('player_reconnected', onPlayerReconnected);
+    socket.on('round_started', onRoundStarted);
+    socket.on('round_recap', onRoundRecap);
+    socket.on('game_over', onGameOver);
     socket.on('kicked', onKicked);
 
     if (socket.connected) {
@@ -139,6 +237,9 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       socket.off('player_joined', onPlayerJoined);
       socket.off('player_left', onPlayerLeft);
       socket.off('player_reconnected', onPlayerReconnected);
+      socket.off('round_started', onRoundStarted);
+      socket.off('round_recap', onRoundRecap);
+      socket.off('game_over', onGameOver);
       socket.off('kicked', onKicked);
     };
   }, []);
@@ -159,8 +260,9 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
         socket.emit('create_room', { nickname, avatar }, (res) => {
           if (res.success && res.data) {
-            localStorage.setItem('mind_clash_room_code', res.data.roomCode);
-            localStorage.setItem('mind_clash_session_token', res.data.sessionToken);
+            sessionStorage.setItem('mind_clash_room_code', res.data.roomCode);
+            sessionStorage.setItem('mind_clash_session_token', res.data.sessionToken);
+            sessionStorage.setItem('mind_clash_player_id', res.data.playerId);
 
             const hostPlayer: Player = {
               id: res.data.playerId,
@@ -203,8 +305,9 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
         socket.emit('join_room', { roomCode, nickname, avatar }, (res) => {
           if (res.success && res.data) {
-            localStorage.setItem('mind_clash_room_code', res.data.roomCode);
-            localStorage.setItem('mind_clash_session_token', res.data.sessionToken);
+            sessionStorage.setItem('mind_clash_room_code', res.data.roomCode);
+            sessionStorage.setItem('mind_clash_session_token', res.data.sessionToken);
+            sessionStorage.setItem('mind_clash_player_id', res.data.playerId);
 
             const joinedPlayer: Player = {
               id: res.data.playerId,
@@ -240,20 +343,47 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   // Real backend reconnect
   const reconnect = useCallback((): Promise<{ success: boolean; error?: string }> => {
     return new Promise((resolve) => {
-      const code = localStorage.getItem('mind_clash_room_code');
-      const token = localStorage.getItem('mind_clash_session_token');
+      const code = sessionStorage.getItem('mind_clash_room_code');
+      const token = sessionStorage.getItem('mind_clash_session_token');
 
       if (!code || !token) {
         return resolve({ success: false, error: 'No active session saved' });
       }
 
+      setIsReconnecting(true);
       socket.emit('reconnect_player', { roomCode: code, sessionToken: token }, (res) => {
+        setIsReconnecting(false);
         if (res.success && res.data) {
+          if (res.data.newSessionToken) {
+            sessionStorage.setItem('mind_clash_session_token', res.data.newSessionToken);
+          }
+          sessionStorage.setItem('mind_clash_player_id', res.data.playerId);
           setCurrentRoom(res.data.room);
-          const me = res.data.room.players.find((p) => p.id === socket.id || p.sessionToken === token);
+          const me = res.data.room.players.find(
+            (p) => p.id === socket.id || p.id === res.data!.playerId
+          );
           if (me) setCurrentPlayer(me);
+
+          if (res.data.activeChallenge) {
+            setActiveChallenge(res.data.activeChallenge);
+          }
+          if (res.data.roundRecap) {
+            setRoundRecap(res.data.roundRecap);
+          }
+          if (res.data.podiumData) {
+            setPodiumData(res.data.podiumData);
+          }
           resolve({ success: true });
         } else {
+          sessionStorage.removeItem('mind_clash_room_code');
+          sessionStorage.removeItem('mind_clash_session_token');
+          sessionStorage.removeItem('mind_clash_player_id');
+
+          if (res.error?.includes('server was restarted') || res.error?.includes('does not exist')) {
+            setServerRestartNotice(
+              'The active clash session could not be recovered. The server process was restarted or the room expired, clearing in-memory rooms. Please start or join a new clash.'
+            );
+          }
           resolve({ success: false, error: res.error || 'Reconnection failed' });
         }
       });
@@ -263,10 +393,14 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   // Leave room
   const leaveRoom = useCallback(() => {
     socket.emit('leave_room');
-    localStorage.removeItem('mind_clash_room_code');
-    localStorage.removeItem('mind_clash_session_token');
+    sessionStorage.removeItem('mind_clash_room_code');
+    sessionStorage.removeItem('mind_clash_session_token');
+    sessionStorage.removeItem('mind_clash_player_id');
     setCurrentRoom(null);
     setCurrentPlayer(null);
+    setActiveChallenge(null);
+    setRoundRecap(null);
+    setPodiumData(null);
   }, []);
 
   // Start game (Host only)
@@ -313,6 +447,73 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     },
     []
   );
+
+  // Submit Trivia Answer
+  const submitTrivia = useCallback(
+    (answerIndex: number): Promise<{ success: boolean; error?: string }> => {
+      return new Promise((resolve) => {
+        socket.emit('submit_trivia_answer', { answerIndex, clientTimeMs: Date.now() }, (res) => {
+          resolve({ success: !!res?.success, error: res?.error });
+        });
+      });
+    },
+    []
+  );
+
+  // Submit Math Answer
+  const submitMath = useCallback(
+    (answer: number): Promise<{ success: boolean; error?: string }> => {
+      return new Promise((resolve) => {
+        socket.emit('submit_math_answer', { answer, clientTimeMs: Date.now() }, (res) => {
+          resolve({ success: !!res?.success, error: res?.error });
+        });
+      });
+    },
+    []
+  );
+
+  // Submit Memory Sequence or Tiles
+  const submitMemory = useCallback(
+    (input: number[] | string[]): Promise<{ success: boolean; error?: string }> => {
+      return new Promise((resolve) => {
+        const payload =
+          input.length > 0 && typeof input[0] === 'string'
+            ? { sequence: input as string[], clientTimeMs: Date.now() }
+            : { selectedIndices: input as number[], clientTimeMs: Date.now() };
+        socket.emit('submit_memory_tiles', payload, (res) => {
+          resolve({ success: !!res?.success, error: res?.error });
+        });
+      });
+    },
+    []
+  );
+
+  // Submit Reaction Click
+  const submitReaction = useCallback((): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      socket.emit('submit_reaction_click', { clientTimeMs: Date.now() }, (res) => {
+        resolve({ success: !!res?.success, error: res?.error });
+      });
+    });
+  }, []);
+
+  // Play Again (Rematch)
+  const playAgain = useCallback((): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      socket.emit('play_again', (res) => {
+        resolve({ success: !!res?.success, error: res?.error });
+      });
+    });
+  }, []);
+
+  // Return to Lobby (Host only)
+  const returnToLobby = useCallback((): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      socket.emit('return_to_lobby', (res) => {
+        resolve({ success: !!res?.success, error: res?.error });
+      });
+    });
+  }, []);
 
   // Sample room loader for UI demo purposes
   const loadSampleRoom = () => {
@@ -400,6 +601,9 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     <GameStateContext.Provider
       value={{
         isConnected,
+        isReconnecting,
+        serverRestartNotice,
+        clearServerRestartNotice,
         socketId,
         currentRoom,
         currentPlayer,
@@ -415,6 +619,13 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         startGame,
         kickPlayer,
         updateSettings,
+        submitTrivia,
+        submitMath,
+        submitMemory,
+        submitReaction,
+        playAgain,
+        returnToLobby,
+        clockOffsetMs,
         setCurrentRoom,
         setCurrentPlayer,
         setActiveChallenge,

@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Zap, AlertTriangle, CheckCircle2, Clock } from 'lucide-react';
+import { Zap, AlertTriangle, CheckCircle2, Clock, Info, ShieldAlert } from 'lucide-react';
 import { ReactionChallengeClient } from '@mind-clash/shared';
 import { sounds } from '../../audio/soundEffects';
+import { useGame } from '../../context/GameStateContext';
 
 interface ReactionViewProps {
   challenge: ReactionChallengeClient;
@@ -16,29 +17,40 @@ export const ReactionView: React.FC<ReactionViewProps> = ({
   onFalseStart,
   disabled = false,
 }) => {
+  const { clockOffsetMs } = useGame();
   const [state, setState] = useState<'waiting' | 'ready' | 'clicked' | 'false_start'>('waiting');
   const [reactionMs, setReactionMs] = useState<number | null>(null);
-  const triggerTimeRef = useRef<number | null>(null);
+  const activationTimeRef = useRef<number | null>(null);
 
+  // Synchronized target activation using server-provided timestamp and clock offset
   useEffect(() => {
     setState('waiting');
     setReactionMs(null);
-    triggerTimeRef.current = null;
 
-    const delay = challenge.waitDelayMs || 3000;
+    const serverTargetTime =
+      challenge.targetActivationTime ||
+      Date.now() + (challenge.waitDelayMs || 3000);
+
+    activationTimeRef.current = serverTargetTime;
+
+    const estimatedNow = Date.now() + clockOffsetMs;
+    const delay = Math.max(0, serverTargetTime - estimatedNow);
+
     const timer = setTimeout(() => {
-      triggerTimeRef.current = Date.now();
       setState('ready');
       sounds.playReactionTrigger();
     }, delay);
 
     return () => clearTimeout(timer);
-  }, [challenge]);
+  }, [challenge.id, challenge.targetActivationTime, challenge.waitDelayMs, clockOffsetMs]);
 
-  const handlePadClick = () => {
+  const handleStrike = () => {
     if (disabled || state === 'clicked' || state === 'false_start') return;
 
-    if (state === 'waiting') {
+    const estimatedNow = Date.now() + clockOffsetMs;
+    const targetTime = activationTimeRef.current || 0;
+
+    if (state === 'waiting' || estimatedNow < targetTime) {
       // Early click / Jump the gun!
       setState('false_start');
       sounds.playError();
@@ -46,8 +58,8 @@ export const ReactionView: React.FC<ReactionViewProps> = ({
       return;
     }
 
-    if (state === 'ready' && triggerTimeRef.current) {
-      const elapsed = Date.now() - triggerTimeRef.current;
+    if (state === 'ready' && activationTimeRef.current) {
+      const elapsed = Math.max(15, estimatedNow - activationTimeRef.current);
       setReactionMs(elapsed);
       setState('clicked');
       sounds.playSuccess();
@@ -55,67 +67,88 @@ export const ReactionView: React.FC<ReactionViewProps> = ({
     }
   };
 
+  // Keyboard Spacebar / Enter shortcut
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' || e.code === 'Enter') {
+        e.preventDefault();
+        handleStrike();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  });
+
   return (
-    <div className="w-full max-w-2xl mx-auto space-y-4">
-      {/* Header Info */}
+    <div className="w-full max-w-2xl mx-auto space-y-4 animate-fade-in motion-reduce:animate-none">
+      {/* Header Info & Defined Round Phase */}
       <div className="flex items-center justify-between text-xs font-semibold">
-        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 uppercase tracking-wider">
+        <span className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 uppercase tracking-wider font-bold">
           <Zap className="w-3.5 h-3.5" />
-          Reaction Clash
+          Reaction Rush • Reflex Clash
         </span>
-        <span className="text-slate-400">Pure reflex battle</span>
+        <span className="text-slate-400 hidden sm:inline text-xs">
+          Press <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-amber-300 font-mono text-[10px]">SPACE</kbd> or tap screen
+        </span>
       </div>
 
-      {/* Massive Interactive Reflex Trigger Pad */}
+      {/* Massive Interactive Reflex Trigger Pad with Rich Textual & Visual Cues */}
       <button
         type="button"
-        onClick={handlePadClick}
+        onClick={handleStrike}
         disabled={disabled}
-        aria-label="Reaction pad"
-        className={`w-full aspect-[4/3] sm:aspect-[16/9] rounded-3xl p-8 flex flex-col items-center justify-center text-center transition-all duration-150 select-none border shadow-2xl focus:outline-none focus-visible:ring-4 ${
+        aria-label="Reaction trigger pad"
+        className={`w-full aspect-[4/3] sm:aspect-[16/9] rounded-3xl p-8 flex flex-col items-center justify-center text-center transition-all duration-100 select-none border-4 shadow-2xl focus:outline-none focus-visible:ring-4 ${
           state === 'waiting'
-            ? 'bg-rose-950/40 border-rose-500/30 text-rose-200 cursor-pointer active:scale-98'
+            ? 'bg-rose-950/40 border-dashed border-rose-500/50 text-rose-200 cursor-pointer active:scale-98'
             : state === 'ready'
-            ? 'bg-emerald-500 border-emerald-300 text-slate-950 shadow-emerald-500/60 scale-102 cursor-pointer animate-pulse motion-reduce:animate-none'
+            ? 'bg-emerald-500 border-solid border-emerald-300 text-slate-950 shadow-emerald-500/60 scale-102 cursor-pointer animate-pulse motion-reduce:animate-none'
             : state === 'false_start'
-            ? 'bg-rose-900 border-rose-500 text-white animate-shake motion-reduce:animate-none'
-            : 'bg-cyan-950/60 border-cyan-400 text-cyan-200'
+            ? 'bg-rose-900 border-solid border-rose-500 text-white animate-shake motion-reduce:animate-none'
+            : 'bg-cyan-950/70 border-solid border-cyan-400 text-cyan-200'
         }`}
       >
         {state === 'waiting' && (
-          <div className="space-y-4">
-            <div className="w-20 h-20 mx-auto rounded-full bg-rose-500/20 border border-rose-500/40 flex items-center justify-center animate-pulse motion-reduce:animate-none">
+          <div className="space-y-4 max-w-sm mx-auto">
+            <div className="w-20 h-20 mx-auto rounded-full bg-rose-500/20 border-2 border-rose-500/40 flex items-center justify-center animate-pulse motion-reduce:animate-none">
               <Clock className="w-10 h-10 text-rose-400" />
             </div>
-            <h2 className="text-2xl sm:text-4xl font-black uppercase tracking-wider">
-              Wait For Green...
-            </h2>
-            <p className="text-xs sm:text-sm text-rose-300/80 font-medium max-w-xs mx-auto">
-              Do NOT click early or you will receive a false-start penalty!
-            </p>
+            <div className="space-y-1">
+              <span className="text-[11px] font-mono font-bold uppercase tracking-widest text-rose-400 block">
+                [SHARED WAITING SCREEN]
+              </span>
+              <h2 className="text-2xl sm:text-4xl font-black uppercase tracking-wider text-white">
+                WAIT FOR SIGNAL
+              </h2>
+            </div>
+            <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-xs text-rose-300 font-semibold flex items-center justify-center gap-1.5">
+              <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>DO NOT TAP EARLY (-200 pts false start penalty)</span>
+            </div>
           </div>
         )}
 
         {state === 'ready' && (
           <div className="space-y-3">
-            <Zap className="w-20 h-20 mx-auto fill-current animate-bounce motion-reduce:animate-none" />
-            <h2 className="text-4xl sm:text-6xl font-black uppercase tracking-tight">
-              TAP NOW!
+            <Zap className="w-20 h-20 mx-auto fill-current animate-bounce motion-reduce:animate-none text-slate-950" />
+            <h2 className="text-4xl sm:text-7xl font-black uppercase tracking-tight text-slate-950">
+              STRIKE NOW!
             </h2>
-            <p className="text-sm font-bold uppercase tracking-widest text-slate-900">
-              Strike Fast!
+            <p className="text-base sm:text-lg font-black uppercase tracking-widest text-slate-900">
+              [TAP OR PRESS SPACE]
             </p>
           </div>
         )}
 
         {state === 'false_start' && (
-          <div className="space-y-3">
+          <div className="space-y-3 max-w-sm mx-auto">
             <AlertTriangle className="w-16 h-16 mx-auto text-rose-300" />
             <h2 className="text-3xl sm:text-4xl font-black uppercase tracking-wider text-white">
-              False Start!
+              FALSE START!
             </h2>
-            <p className="text-sm text-rose-200 font-semibold">
-              You clicked before the green signal. -200 pts penalty.
+            <p className="text-xs sm:text-sm text-rose-200 font-semibold">
+              Premature tap recorded before target activation. -200 pts penalty applied.
             </p>
           </div>
         )}
@@ -124,23 +157,36 @@ export const ReactionView: React.FC<ReactionViewProps> = ({
           <div className="space-y-2">
             <CheckCircle2 className="w-14 h-14 mx-auto text-cyan-400" />
             <span className="text-xs uppercase tracking-widest text-cyan-300 font-bold block">
-              Reflex Measured
+              Reflex Measured Authoritatively
             </span>
             <h2 className="text-5xl sm:text-6xl font-mono font-black text-white">
               {reactionMs} <span className="text-2xl text-cyan-400">ms</span>
             </h2>
-            <p className="text-xs text-slate-400 font-medium">
-              {reactionMs < 200
-                ? '⚡ Godlike Superhuman Reflexes!'
-                : reactionMs < 280
-                ? '🔥 Lightning Speed!'
+            <p className="text-xs font-bold text-cyan-300">
+              {reactionMs < 250
+                ? '⚡ Superhuman Reflexes!'
                 : reactionMs < 380
-                ? '👍 Solid Reaction!'
-                : '🐢 A bit sluggish!'}
+                ? '🔥 Lightning Speed!'
+                : reactionMs < 500
+                ? '👍 Solid Reflex!'
+                : '🐢 Steady Reaction!'}
             </p>
           </div>
         )}
       </button>
+
+      {/* Network Latency Disclosure Notice */}
+      <div className="p-3.5 rounded-2xl bg-slate-900/80 border border-white/10 text-xs text-slate-400 flex items-start gap-2.5 backdrop-blur-md">
+        <Info className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
+        <div className="space-y-0.5">
+          <span className="font-bold text-slate-300 uppercase text-[10px] tracking-wider block">
+            Network Latency Notice
+          </span>
+          <p className="leading-relaxed">
+            Online multiplayer reflex times depend on network transit latency (ping) between your device and the server. Reaction rankings are calibrated for competitive fun, not laboratory millisecond fairness.
+          </p>
+        </div>
+      </div>
     </div>
   );
 };

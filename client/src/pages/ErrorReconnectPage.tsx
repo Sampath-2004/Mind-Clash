@@ -8,7 +8,7 @@ import { RECONNECT_GRACE_PERIOD_MS } from '@mind-clash/shared';
 export const ErrorReconnectPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { isConnected } = useGame();
+  const { isConnected, reconnect, currentRoom } = useGame();
 
   const type = searchParams.get('type') || 'disconnected';
   const reason = searchParams.get('reason') || 'Lost connection to multiplayer game server';
@@ -26,15 +26,25 @@ export const ErrorReconnectPage: React.FC = () => {
     return () => clearInterval(timer);
   }, [type]);
 
-  const handleRetry = () => {
+  const handleRetry = async () => {
     sounds.playClick();
     setIsRetrying(true);
-    setTimeout(() => {
-      setIsRetrying(false);
-      if (isConnected) {
+    const res = await reconnect();
+    setIsRetrying(false);
+
+    if (res.success) {
+      if (currentRoom?.status === 'ROUND_ACTIVE' || currentRoom?.status === 'COUNTDOWN') {
+        navigate('/game');
+      } else if (currentRoom?.status === 'ROUND_RECAP') {
+        navigate('/recap');
+      } else if (currentRoom?.status === 'GAME_OVER') {
+        navigate('/podium');
+      } else {
         navigate('/lobby');
       }
-    }, 1500);
+    } else if (isConnected) {
+      navigate('/lobby');
+    }
   };
 
   return (
@@ -52,7 +62,7 @@ export const ErrorReconnectPage: React.FC = () => {
               <UserX className="w-8 h-8" />
             </div>
           )}
-          {type === 'not_found' && (
+          {(type === 'not_found' || type === 'server_restarted') && (
             <div className="w-full h-full rounded-2xl bg-purple-500/10 border border-purple-500/30 flex items-center justify-center text-purple-400">
               <AlertOctagon className="w-8 h-8" />
             </div>
@@ -65,6 +75,7 @@ export const ErrorReconnectPage: React.FC = () => {
             {type === 'disconnected' && 'Connection Interrupted'}
             {type === 'kicked' && 'Removed From Room'}
             {type === 'not_found' && 'Room Not Found'}
+            {type === 'server_restarted' && 'Server Process Restarted'}
           </h1>
           <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">{reason}</p>
         </div>

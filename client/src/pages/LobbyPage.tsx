@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Play, UserPlus, LogOut, ShieldAlert } from 'lucide-react';
 import { useGame, AVATAR_OPTIONS } from '../context/GameStateContext';
@@ -8,17 +8,31 @@ import { SettingsSummary } from '../components/lobby/SettingsSummary';
 import { ShareModal } from '../components/lobby/ShareModal';
 import { sounds } from '../audio/soundEffects';
 import { useToast } from '../context/ToastContext';
-import { MAX_PLAYERS_PER_ROOM } from '@mind-clash/shared';
+import { MAX_PLAYERS_PER_ROOM, RoomSettings } from '@mind-clash/shared';
 
 export const LobbyPage: React.FC = () => {
   const navigate = useNavigate();
-  const { currentRoom, currentPlayer, startGame, kickPlayer, leaveRoom, setCurrentRoom } = useGame();
+  const { currentRoom, currentPlayer, startGame, kickPlayer, leaveRoom, setCurrentRoom, updateSettings } = useGame();
   const { showToast } = useToast();
   const [isShareOpen, setIsShareOpen] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
 
+  const handleUpdateSettings = async (newSettings: Partial<RoomSettings>) => {
+    const res = await updateSettings(newSettings);
+    if (!res.success) {
+      showToast('Settings Error', res.error || 'Could not update room settings', 'error');
+    }
+  };
+
   // If no room is active, prompt user to create or join
   const room = currentRoom;
+
+  // Synchronized navigation when match begins
+  useEffect(() => {
+    if (room && (room.status === 'COUNTDOWN' || room.status === 'ROUND_ACTIVE')) {
+      navigate('/game');
+    }
+  }, [room?.status, navigate]);
 
   const isHost = room && currentPlayer ? room.hostId === currentPlayer.id || currentPlayer.isHost : false;
   const connectedPlayers = room ? room.players.filter((p) => p.isConnected) : [];
@@ -130,7 +144,11 @@ export const LobbyPage: React.FC = () => {
           onOpenShare={() => setIsShareOpen(true)}
           size="large"
         />
-        <SettingsSummary settings={room.settings} />
+        <SettingsSummary
+          settings={room.settings}
+          isHost={isHost}
+          onUpdateSettings={handleUpdateSettings}
+        />
       </div>
 
       {/* Main Roster Panel */}
@@ -147,6 +165,7 @@ export const LobbyPage: React.FC = () => {
           {/* Host Controls */}
           {isHost ? (
             <button
+              data-testid="start-match-btn"
               onClick={handleStartGame}
               disabled={room.players.length < 2 || isStarting}
               className={`w-full sm:flex-1 py-4 px-6 rounded-2xl font-black text-sm uppercase tracking-wider flex items-center justify-center gap-2 shadow-xl transition-all active:scale-98 ${
