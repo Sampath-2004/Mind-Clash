@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Trophy, ArrowRight, Zap, CheckCircle2, AlertCircle, Clock } from 'lucide-react';
+import { Trophy, ArrowRight, Zap, CheckCircle2, AlertCircle, Clock, XCircle, Sparkles } from 'lucide-react';
 import { useGame } from '../context/GameStateContext';
 import { PlayerCard } from '../components/common/PlayerCard';
 import { sounds } from '../audio/soundEffects';
@@ -39,6 +39,8 @@ export const RoundRecapPage: React.FC = () => {
           memoryPerfectCount: 1,
           fastestReactionMs: 220,
           highestStreak: 4,
+          rareAnswerCorrect: 1,
+          rareAnswerTotal: 1,
         },
       },
       pointsEarned: 800,
@@ -64,6 +66,8 @@ export const RoundRecapPage: React.FC = () => {
           memoryPerfectCount: 0,
           fastestReactionMs: 254,
           highestStreak: 2,
+          rareAnswerCorrect: 1,
+          rareAnswerTotal: 1,
         },
       },
       pointsEarned: 630,
@@ -89,6 +93,8 @@ export const RoundRecapPage: React.FC = () => {
           memoryPerfectCount: 1,
           fastestReactionMs: 310,
           highestStreak: 1,
+          rareAnswerCorrect: 0,
+          rareAnswerTotal: 1,
         },
       },
       pointsEarned: 350,
@@ -173,6 +179,14 @@ export const RoundRecapPage: React.FC = () => {
                     </strong>
                   </>
                 )}
+                {roundRecap.mode === 'rare_answer' && (
+                  <>
+                    Rare Answer Challenge:{' '}
+                    <strong className="text-white font-bold">
+                      {roundRecap.rareAnswerPrompt || 'Uniqueness Evaluated'}
+                    </strong>
+                  </>
+                )}
               </>
             ) : (
               <>
@@ -183,9 +197,26 @@ export const RoundRecapPage: React.FC = () => {
           </span>
         </div>
         <span className="font-mono text-emerald-400 font-bold shrink-0">
-          +100 Base + Up to 50 Speed Bonus
+          {roundRecap?.mode === 'rare_answer'
+            ? 'Match Uniqueness: 100 ÷ Matching Players'
+            : '+100 Base + Up to 50 Speed Bonus'}
         </span>
       </div>
+
+      {/* Round Voided Banner */}
+      {roundRecap?.isVoided && (
+        <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex items-start gap-3">
+          <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <span className="font-bold text-amber-300 uppercase text-xs tracking-wider block">
+              Round Voided & Replaced
+            </span>
+            <p className="text-xs text-amber-200/90 leading-relaxed">
+              {roundRecap.voidReason || 'Round could not be judged fairly and was voided for everyone. A replacement round has been scheduled with no score penalties.'}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Network Latency Notice Banner */}
       {roundRecap?.networkNotice && (
@@ -195,6 +226,100 @@ export const RoundRecapPage: React.FC = () => {
             <strong className="text-white font-semibold">Fairness Notice: </strong>
             {roundRecap.networkNotice}
           </span>
+        </div>
+      )}
+
+      {/* Rare Answer Submissions & Rarity Breakdown */}
+      {roundRecap?.rareAnswerSubmissions && roundRecap.rareAnswerSubmissions.length > 0 && (
+        <div className="glass-panel p-6 rounded-3xl space-y-4 border border-rose-500/20">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-rose-400" />
+              <h3 className="text-sm font-black text-white uppercase tracking-wider">
+                Submitted Answers & Match Rarity
+              </h3>
+            </div>
+            <span className="text-[11px] font-mono text-rose-300">
+              Match Uniqueness Only
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {roundRecap.rareAnswerSubmissions.map((sub) => (
+              <div
+                key={sub.playerId}
+                className={`p-3.5 rounded-2xl border transition ${
+                  sub.isValid
+                    ? 'bg-slate-900/80 border-emerald-500/30'
+                    : 'bg-slate-900/80 border-rose-500/30'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-sm font-bold text-white truncate">
+                      {sub.nickname}
+                      {sub.playerId === currentPlayer?.id && (
+                        <span className="ml-1 text-rose-400 text-[10px]">(You)</span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {sub.isValid ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                        Valid
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 text-[10px] font-bold">
+                        <XCircle className="w-3 h-3 text-rose-400" />
+                        Invalid
+                      </span>
+                    )}
+                    <span className="font-mono font-bold text-xs text-white">
+                      +{sub.pointsEarned} pts
+                    </span>
+                  </div>
+                </div>
+
+                <div className="space-y-1 text-xs">
+                  <div className="font-mono text-slate-200 bg-white/5 px-2.5 py-1.5 rounded-lg border border-white/5 break-words">
+                    &ldquo;{sub.answer || '(No submission)'}&rdquo;
+                    {sub.canonicalAnswer && sub.canonicalAnswer.toLowerCase() !== (sub.answer || '').toLowerCase() && (
+                      <span className="block text-[10px] text-slate-400 not-italic mt-0.5">
+                        Recognized alias: <strong className="text-slate-300">{sub.canonicalAnswer}</strong>
+                      </span>
+                    )}
+                  </div>
+                  {sub.isValid ? (
+                    <div className="text-[11px] text-emerald-400 font-semibold flex items-center justify-between">
+                      <span>
+                        {sub.duplicateCount === 1
+                          ? '🌟 Unique (1 player)'
+                          : `👥 Shared with ${sub.duplicateCount} players`}
+                      </span>
+                      <span className="font-mono text-slate-400 text-[10px]">
+                        Math.round(100 / {sub.duplicateCount})
+                      </span>
+                    </div>
+                  ) : null}
+                  {sub.explanation && (
+                    <p className="text-[11px] text-slate-400 italic pt-0.5 leading-snug">
+                      {sub.explanation}
+                    </p>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Scoring explainer notice */}
+          <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5 text-[11px] text-slate-400 space-y-1">
+            <span className="font-bold text-slate-300 block">Scoring Breakdown:</span>
+            <p>
+              Scores are calculated solely based on answer uniqueness within this match:
+              Valid unique answers award 100 points. Shared answers divide 100 points (50 each for 2 players, 33 each for 3). Blank or invalid answers score 0. No speed bonus. Normalized for casing, spacing, punctuation, and aliases without merging distinctly different answers.
+            </p>
+          </div>
         </div>
       )}
 
@@ -235,6 +360,8 @@ export const RoundRecapPage: React.FC = () => {
                     memoryPerfectCount: 0,
                     fastestReactionMs: null,
                     highestStreak: 0,
+                    rareAnswerCorrect: 0,
+                    rareAnswerTotal: 0,
                   },
                 };
 
@@ -248,6 +375,16 @@ export const RoundRecapPage: React.FC = () => {
                       showScore={true}
                     />
                     <div className="absolute right-24 sm:right-32 top-1/2 -translate-y-1/2 flex items-center gap-1.5 text-xs font-mono">
+                      {res.submittedAnswerText && (
+                        <span className="hidden md:inline-block text-[11px] text-slate-400 italic mr-2 truncate max-w-[150px]">
+                          &ldquo;{res.submittedAnswerText}&rdquo;
+                          {res.rarityCount !== undefined && res.isCorrect && (
+                            <span className="ml-1 text-cyan-300 font-bold not-italic">
+                              ({res.rarityCount === 1 ? 'Unique' : `${res.rarityCount} matched`})
+                            </span>
+                          )}
+                        </span>
+                      )}
                       {res.falseStart ? (
                         <span className="text-rose-400 font-bold flex items-center gap-1">
                           <AlertCircle className="w-3.5 h-3.5" /> -200 (False Start)

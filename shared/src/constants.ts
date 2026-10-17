@@ -19,6 +19,8 @@ export const ROUND_INTRO_COUNTDOWN_MS = 3_000; // "Round X: Mode Name"
 export const ROUND_RECAP_DURATION_MS = 5_000; // Score reveal + ranking
 export const DEFAULT_QUESTION_DURATION_MS = 15_000; // 15-second question rounds
 
+export const DEFAULT_DIFFICULTY = 'medium' as const;
+
 // Mode-Specific Timing Defaults (ms)
 export const TRIVIA_ROUND_DURATION_MS = 15_000;
 export const MATH_ROUND_DURATION_MS = 15_000;
@@ -27,6 +29,8 @@ export const MEMORY_INPUT_DURATION_MS = 7_200;
 export const REACTION_MIN_DELAY_MS = 2_000;
 export const REACTION_MAX_DELAY_MS = 5_000;
 export const REACTION_TIMEOUT_MS = 4_000;
+export const RARE_ANSWER_DEFAULT_ROUND_COUNT = 7;
+export const RARE_ANSWER_ROUND_DURATION_MS = 25_000;
 
 // Network tolerance buffer for client-server latency
 export const NETWORK_LATENCY_BUFFER_MS = 350;
@@ -51,5 +55,8 @@ export const SCORING = {
     FASTEST_REACTION_POINTS: 1000,
     MIN_POINTS: 200,
     FALSE_START_PENALTY: -200,
+  },
+  RARE_ANSWER: {
+    MAX_POINTS: 100, // Points = Math.round(100 / countOfEquivalentAnswers), 0 for invalid/blank, no speed bonus
   },
 } as const;

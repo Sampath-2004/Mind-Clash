@@ -11,6 +11,7 @@ export default tseslint.config(
       '**/build/**',
       '**/.system_generated/**',
       '**/coverage/**',
+      'scripts/**',
     ],
   },
   {

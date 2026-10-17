@@ -1,8 +1,8 @@
 import crypto from 'crypto';
 import {
+  Difficulty,
   MemoryChallengeServer,
   MemorySymbol,
-  MEMORY_REVEAL_DURATION_MS,
   MEMORY_INPUT_DURATION_MS,
 } from '@mind-clash/shared';
 
@@ -17,12 +17,38 @@ export const MEMORY_SYMBOLS: MemorySymbol[] = [
 
 export function generateMemoryChallenge(
   roundNumber: number,
-  startTime: number = Date.now()
+  startTime: number = Date.now(),
+  difficulty: Difficulty = 'medium'
 ): MemoryChallengeServer {
-  // Sequence length scales with round number: Round 1-2: 4, Round 3-4: 5, Round 5+: 6
-  const seqLength = roundNumber <= 2 ? 4 : roundNumber <= 4 ? 5 : 6;
-  const viewingDurationMs = roundNumber <= 2 ? 3000 : roundNumber <= 4 ? 3500 : 4000;
-  const inputDurationMs = MEMORY_INPUT_DURATION_MS;
+  // Sequence length and viewing time scale by Difficulty and Round
+  let seqLength: number;
+  let viewingDurationMs: number;
+  let inputDurationMs: number;
+  let gridSize: number;
+  let patternCount: number;
+
+  if (difficulty === 'easy') {
+    // Easy: shorter sequence, generous viewing time, smaller grid
+    seqLength = roundNumber <= 2 ? 3 : 4;
+    viewingDurationMs = 3500;
+    inputDurationMs = 8000;
+    gridSize = 3;
+    patternCount = 3;
+  } else if (difficulty === 'medium') {
+    // Medium: balanced recall challenge
+    seqLength = roundNumber <= 2 ? 4 : 5;
+    viewingDurationMs = 3000;
+    inputDurationMs = MEMORY_INPUT_DURATION_MS;
+    gridSize = roundNumber >= 4 ? 4 : 3;
+    patternCount = gridSize === 4 ? 5 : 4;
+  } else {
+    // Hard: longer sequence, fast viewing time, demanding recall
+    seqLength = roundNumber <= 2 ? 6 : 7;
+    viewingDurationMs = 2400;
+    inputDurationMs = 6500;
+    gridSize = 4;
+    patternCount = 6;
+  }
 
   const sequence: string[] = [];
   const symbolIds = MEMORY_SYMBOLS.map((s) => s.id);
@@ -34,10 +60,8 @@ export function generateMemoryChallenge(
 
   const viewingEndTime = startTime + viewingDurationMs;
 
-  // Backward-compatible tile matrix solution
-  const gridSize = roundNumber >= 4 ? 4 : 3;
+  // Backward-compatible tile matrix solution (achievable on mobile screens)
   const totalTiles = gridSize * gridSize;
-  const patternCount = gridSize === 4 ? 6 : 4;
   const patternIndices = new Set<number>();
   while (patternIndices.size < patternCount) {
     patternIndices.add(crypto.randomInt(0, totalTiles));
@@ -45,7 +69,7 @@ export function generateMemoryChallenge(
   const tileSolution = Array.from(patternIndices);
 
   return {
-    id: `mem-r${roundNumber}-${Date.now()}-${crypto.randomInt(100, 999)}`,
+    id: `mem-${difficulty}-r${roundNumber}-${Date.now()}-${crypto.randomInt(100, 999)}`,
     symbols: MEMORY_SYMBOLS,
     sequence,
     solutionSequence: sequence,
@@ -55,6 +79,6 @@ export function generateMemoryChallenge(
     gridSize,
     pattern: tileSolution,
     solution: tileSolution,
-    revealDurationMs: viewingDurationMs || MEMORY_REVEAL_DURATION_MS,
+    revealDurationMs: viewingDurationMs,
   };
 }

@@ -42,10 +42,11 @@ export const updateSettingsSchema = z.object({
       .max(MAX_ROUND_COUNT, `Maximum rounds: ${MAX_ROUND_COUNT}`)
       .optional(),
     selectedModes: z
-      .array(z.enum(['trivia', 'math', 'memory', 'reaction']))
+      .array(z.enum(['trivia', 'math', 'memory', 'reaction', 'rare_answer']))
       .min(1, 'At least one game mode must be selected')
-      .max(4)
+      .max(5)
       .optional(),
+    difficulty: z.enum(['easy', 'medium', 'hard']).optional(),
   }),
 });
 
@@ -73,6 +74,11 @@ export const submitReactionSchema = z.object({
   clientTimeMs: z.number().positive().finite(),
 });
 
+export const submitRareAnswerSchema = z.object({
+  answer: z.string().trim().min(1, 'Answer cannot be empty').max(100, 'Answer must not exceed 100 characters'),
+  clientTimeMs: z.number().positive().finite(),
+});
+
 export const pingClockSchema = z.number().finite();
 
 export type CreateRoomInput = z.infer<typeof createRoomSchema>;
@@ -84,5 +90,6 @@ export type SubmitTriviaInput = z.infer<typeof submitTriviaSchema>;
 export type SubmitMathInput = z.infer<typeof submitMathSchema>;
 export type SubmitMemoryInput = z.infer<typeof submitMemorySchema>;
 export type SubmitReactionInput = z.infer<typeof submitReactionSchema>;
+export type SubmitRareAnswerInput = z.infer<typeof submitRareAnswerSchema>;
 export type PingClockInput = z.infer<typeof pingClockSchema>;
 

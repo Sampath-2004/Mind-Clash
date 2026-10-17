@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Play, UserPlus, LogOut, ShieldAlert } from 'lucide-react';
+import { Play, UserPlus, LogOut, ShieldAlert, Sparkles, RefreshCw, AlertTriangle, BookOpen, XCircle } from 'lucide-react';
 import { useGame, AVATAR_OPTIONS } from '../context/GameStateContext';
 import { RoomCodeDisplay } from '../components/common/RoomCodeDisplay';
 import { PlayerList } from '../components/lobby/PlayerList';
@@ -12,7 +12,20 @@ import { MAX_PLAYERS_PER_ROOM, RoomSettings } from '@mind-clash/shared';
 
 export const LobbyPage: React.FC = () => {
   const navigate = useNavigate();
-  const { currentRoom, currentPlayer, startGame, kickPlayer, leaveRoom, setCurrentRoom, updateSettings } = useGame();
+  const {
+    currentRoom,
+    currentPlayer,
+    startGame,
+    kickPlayer,
+    leaveRoom,
+    setCurrentRoom,
+    updateSettings,
+    retryAiGeneration,
+    useOfflineQuestions,
+    cancelMatch,
+    preparingInfo,
+    preparationError,
+  } = useGame();
   const { showToast } = useToast();
   const [isShareOpen, setIsShareOpen] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
@@ -49,10 +62,37 @@ export const LobbyPage: React.FC = () => {
     setIsStarting(false);
 
     if (result.success) {
-      showToast('Match Starting!', 'Entering synchronized battle arena...', 'info');
-      navigate('/game');
+      showToast('Match Starting!', 'Preparing questions and initializing arena...', 'info');
     } else {
       showToast('Could Not Start', result.error || 'Server rejected start request', 'error');
+    }
+  };
+
+  const handleRetryAi = async () => {
+    sounds.playClick();
+    setIsStarting(true);
+    const result = await retryAiGeneration();
+    setIsStarting(false);
+    if (!result.success) {
+      showToast('Retry Failed', result.error || 'Could not retry question generation', 'error');
+    }
+  };
+
+  const handleUseOffline = async () => {
+    sounds.playClick();
+    setIsStarting(true);
+    const result = await useOfflineQuestions();
+    setIsStarting(false);
+    if (!result.success) {
+      showToast('Offline Start Failed', result.error || 'Could not start offline questions', 'error');
+    }
+  };
+
+  const handleCancelMatch = async () => {
+    sounds.playClick();
+    const result = await cancelMatch();
+    if (!result.success) {
+      showToast('Cancel Failed', result.error || 'Could not cancel match preparation', 'error');
     }
   };
 
@@ -84,6 +124,8 @@ export const LobbyPage: React.FC = () => {
         memoryPerfectCount: 0,
         fastestReactionMs: null,
         highestStreak: 0,
+        rareAnswerCorrect: 0,
+        rareAnswerTotal: 0,
       },
     };
 
@@ -214,6 +256,105 @@ export const LobbyPage: React.FC = () => {
         onClose={() => setIsShareOpen(false)}
         roomCode={room.roomCode}
       />
+
+      {/* Preparing Questions Modal / Synchronized Overlay */}
+      {room.status === 'PREPARING_QUESTIONS' && (
+        <div
+          data-testid="preparing-questions-overlay"
+          className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in"
+        >
+          <div className="glass-panel p-8 sm:p-10 rounded-3xl max-w-md w-full text-center space-y-6 border border-cyan-500/30 shadow-2xl relative overflow-hidden">
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-cyan-400 via-purple-500 to-cyan-400 animate-pulse" />
+            <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 mx-auto flex items-center justify-center relative shadow-lg shadow-cyan-500/10">
+              <Sparkles className="w-8 h-8 text-cyan-400 animate-pulse" />
+              <RefreshCw className="w-11 h-11 text-purple-400/40 absolute animate-spin" />
+            </div>
+            <div className="space-y-2">
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 font-bold uppercase tracking-widest text-[10px]">
+                {preparingInfo?.provider || 'Google Gemini AI'}
+              </span>
+              <h3 className="text-xl font-black text-white uppercase tracking-wider">
+                Preparing Questions
+              </h3>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Synthesizing fresh, validated Trivia questions for{' '}
+                <strong className="text-cyan-400 uppercase">{room.settings.difficulty}</strong> difficulty.
+                All players will receive the same synchronized questions and randomized options.
+              </p>
+            </div>
+
+            {isHost ? (
+              <button
+                onClick={handleCancelMatch}
+                className="w-full py-2.5 px-4 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-slate-400 hover:text-white text-xs font-bold transition flex items-center justify-center gap-2"
+              >
+                <XCircle className="w-4 h-4 text-rose-400" />
+                Cancel Preparation
+              </button>
+            ) : (
+              <p className="text-[11px] text-slate-500 italic">
+                Synchronizing with room arena...
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* AI Preparation Failed Modal */}
+      {room.status === 'PREPARATION_FAILED' && (
+        <div
+          data-testid="preparation-failed-overlay"
+          className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in"
+        >
+          <div className="glass-panel p-8 sm:p-10 rounded-3xl max-w-lg w-full text-center space-y-6 border border-rose-500/30 shadow-2xl relative overflow-hidden">
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-rose-500 via-amber-500 to-rose-500 animate-pulse" />
+            <div className="w-16 h-16 rounded-2xl bg-rose-500/10 border border-rose-500/30 mx-auto flex items-center justify-center shadow-lg shadow-rose-500/10">
+              <AlertTriangle className="w-8 h-8 text-rose-400" />
+            </div>
+            <div className="space-y-2">
+              <h3 className="text-xl font-black text-white">AI Question Generation Unavailable</h3>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                {preparationError?.error ||
+                  'AI providers failed to return a validated question batch after retries.'}
+              </p>
+            </div>
+
+            {isHost ? (
+              <div className="space-y-2.5 pt-2">
+                <button
+                  data-testid="retry-ai-btn"
+                  onClick={handleRetryAi}
+                  disabled={isStarting}
+                  className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-purple-600 hover:brightness-110 text-white font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition shadow-lg shadow-cyan-500/20 active:scale-98"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isStarting ? 'animate-spin' : ''}`} />
+                  {isStarting ? 'Retrying Generation...' : 'Retry AI Generation'}
+                </button>
+                <button
+                  data-testid="play-offline-btn"
+                  onClick={handleUseOffline}
+                  disabled={isStarting}
+                  className="w-full py-3.5 px-4 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/40 text-amber-300 font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition active:scale-98"
+                >
+                  <BookOpen className="w-4 h-4" />
+                  Play Offline Questions
+                </button>
+                <button
+                  onClick={handleCancelMatch}
+                  className="w-full py-2.5 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white text-xs font-bold transition"
+                >
+                  Back to Lobby Settings
+                </button>
+              </div>
+            ) : (
+              <div className="p-4 rounded-xl bg-white/5 border border-white/10 text-slate-300 text-xs flex items-center justify-center gap-2">
+                <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+                Waiting for room host to retry generation or choose offline questions...
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

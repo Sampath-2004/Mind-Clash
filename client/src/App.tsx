@@ -27,7 +27,11 @@ function AppContent() {
     if (currentRoom) {
       const path = location.pathname;
       if (path === '/' || path === '/error') {
-        if (currentRoom.status === 'LOBBY') {
+        if (
+          currentRoom.status === 'LOBBY' ||
+          currentRoom.status === 'PREPARING_QUESTIONS' ||
+          currentRoom.status === 'PREPARATION_FAILED'
+        ) {
           navigate('/lobby');
         } else if (currentRoom.status === 'ROUND_ACTIVE' || currentRoom.status === 'COUNTDOWN') {
           navigate('/game');

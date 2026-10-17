@@ -21,11 +21,16 @@ import {
   NETWORK_LATENCY_BUFFER_MS,
   DEFAULT_QUESTION_DURATION_MS,
   deterministicPlayerSort,
+  RareAnswerChallengeServer,
+  RareAnswerSubmissionResult,
+  RARE_ANSWER_ROUND_DURATION_MS,
 } from '@mind-clash/shared';
-import { getRandomTriviaQuestion } from '../modes/triviaBank.js';
 import { generateMathQuestion } from '../modes/mathGenerator.js';
 import { generateMemoryChallenge } from '../modes/memoryGenerator.js';
 import { generateReactionChallenge } from '../modes/reactionGenerator.js';
+import { aiGenerator } from '../services/aiGenerator.js';
+import { duplicatePrevention } from '../services/duplicatePrevention.js';
+import { logger } from '../utils/logger.js';
 
 export interface PlayerSubmission {
   playerId: string;
@@ -34,6 +39,7 @@ export interface PlayerSubmission {
   answer?: number; // Trivia option index, Math answer, or Reaction trigger click
   selectedIndices?: number[]; // Memory tiles
   sequence?: string[]; // Memory symbol sequence
+  textAnswer?: string; // Rare Answer text submission
   falseStart?: boolean;
 }
 
@@ -41,7 +47,8 @@ type SecretChallenge =
   | { mode: 'trivia'; serverChallenge: TriviaQuestionServer }
   | { mode: 'math'; serverChallenge: MathQuestionServer }
   | { mode: 'memory'; serverChallenge: MemoryChallengeServer }
-  | { mode: 'reaction'; serverChallenge: ReactionChallengeServer };
+  | { mode: 'reaction'; serverChallenge: ReactionChallengeServer }
+  | { mode: 'rare_answer'; serverChallenge: RareAnswerChallengeServer };
 
 export class GameEngine {
   private io: Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>;
@@ -50,10 +57,15 @@ export class GameEngine {
   private submissions = new Map<string, Map<string, PlayerSubmission>>(); // roomCode -> (playerId -> submission)
   private previousRanks = new Map<string, Map<string, number>>(); // roomCode -> (playerId -> rank)
   private usedTriviaIds = new Map<string, Set<string>>(); // roomCode -> used question ids
+  private usedRareIds = new Map<string, Set<string>>(); // roomCode -> used rare answer ids
   private modeSchedules = new Map<string, GameMode[]>(); // roomCode -> planned mode rotation
   private clientChallenges = new Map<string, ActiveChallengeClient>(); // roomCode -> current client challenge
   private lastRecaps = new Map<string, RoundRecapData>(); // roomCode -> latest round recap
   private lastPodiums = new Map<string, GameOverPodiumData>(); // roomCode -> latest podium
+  private preparedTriviaBatches = new Map<string, TriviaQuestionServer[]>(); // roomCode -> batch
+  private preparedRareBatches = new Map<string, RareAnswerChallengeServer[]>(); // roomCode -> batch
+  private voidReplacementsCount = new Map<string, number>(); // roomCode -> void count
+  private batchAbortControllers = new Map<string, AbortController>(); // roomCode -> abort controller
 
   constructor(
     io: Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>
@@ -98,9 +110,11 @@ export class GameEngine {
 
   /**
    * Starts a game from the lobby.
+  /**
+   * Starts a game from the lobby or after preparation failure.
    */
-  public startGame(room: RoomState): void {
-    if (room.status !== 'LOBBY') {
+  public async startGame(room: RoomState): Promise<void> {
+    if (room.status !== 'LOBBY' && room.status !== 'PREPARATION_FAILED') {
       throw new Error(`Cannot start match: Room is currently in ${room.status} status`);
     }
 
@@ -109,13 +123,20 @@ export class GameEngine {
       throw new Error('Need at least 2 connected players to start the match');
     }
 
+    // Cancel any previous pending batch generation
+    this.cancelPendingBatch(room.roomCode);
+
     // Initialize/reset match state
-    room.status = 'COUNTDOWN';
     room.totalRounds = room.totalRounds || room.settings.roundCount || 5;
     room.currentRound = 1;
     this.submissions.set(room.roomCode, new Map());
     this.previousRanks.set(room.roomCode, new Map());
-    this.usedTriviaIds.set(room.roomCode, new Set());
+    if (!this.usedTriviaIds.has(room.roomCode)) {
+      this.usedTriviaIds.set(room.roomCode, new Set());
+    }
+    if (!this.usedRareIds.has(room.roomCode)) {
+      this.usedRareIds.set(room.roomCode, new Set());
+    }
 
     // Generate randomized mode schedule for the match
     const schedule = this.generateModeSchedule(room.totalRounds, room.settings.selectedModes);
@@ -132,10 +153,211 @@ export class GameEngine {
         mathTotal: 0,
         memoryPerfectCount: 0,
         fastestReactionMs: null,
+        rareAnswerCorrect: 0,
+        rareAnswerTotal: 0,
         highestStreak: 0,
       };
     });
 
+    const triviaRoundsCount = schedule.filter((m) => m === 'trivia').length;
+    const rareRoundsCount = schedule.filter((m) => m === 'rare_answer').length;
+
+    if (triviaRoundsCount === 0 && rareRoundsCount === 0) {
+      this.beginCountdown(room);
+      return;
+    }
+
+    // Question generation required: Enter PREPARING_QUESTIONS state
+    room.status = 'PREPARING_QUESTIONS';
+    const primaryProviderName = aiGenerator.getPrimaryProviderName();
+
+    this.io.to(room.roomCode).emit('room_state_updated', this.sanitizeRoom(room));
+    this.io.to(room.roomCode).emit('questions_preparing', {
+      count: triviaRoundsCount + rareRoundsCount,
+      provider: primaryProviderName,
+    });
+
+    // Run batch preparation asynchronously
+    this.executeBatchPreparation(room, triviaRoundsCount, rareRoundsCount);
+  }
+
+  private async executeBatchPreparation(
+    room: RoomState,
+    triviaCount: number,
+    rareCount: number
+  ): Promise<void> {
+    const controller = new AbortController();
+    this.batchAbortControllers.set(room.roomCode, controller);
+
+    try {
+      if (triviaCount > 0) {
+        const batch = await aiGenerator.generateTriviaBatch({
+          count: triviaCount,
+          difficulty: room.settings.difficulty || 'medium',
+          signal: controller.signal,
+          usedIds: this.usedTriviaIds.get(room.roomCode),
+          roomCode: room.roomCode,
+        });
+        this.preparedTriviaBatches.set(room.roomCode, batch);
+      }
+
+      if (rareCount > 0) {
+        const rareBatch = await aiGenerator.generateRareAnswerBatch({
+          count: rareCount,
+          difficulty: room.settings.difficulty || 'medium',
+          signal: controller.signal,
+          usedIds: this.usedRareIds.get(room.roomCode),
+          roomCode: room.roomCode,
+        });
+        this.preparedRareBatches.set(room.roomCode, rareBatch);
+      }
+
+      // Ignore if aborted or room status transitioned away from PREPARING_QUESTIONS
+      if (controller.signal.aborted || room.status !== 'PREPARING_QUESTIONS') {
+        await aiGenerator.releaseBatchReservation(room.roomCode);
+        return;
+      }
+
+      // Check if enough players remain connected
+      const connected = room.players.filter((p) => p.isConnected);
+      if (connected.length < 2) {
+        this.returnToLobby(room);
+        this.io.to(room.roomCode).emit('error_message', {
+          message: 'Match start cancelled: Fewer than 2 players remain connected.',
+        });
+        return;
+      }
+
+      this.batchAbortControllers.delete(room.roomCode);
+
+      // Begin countdown only after complete, validated batches are ready
+      this.beginCountdown(room);
+    } catch (err: unknown) {
+      await aiGenerator.releaseBatchReservation(room.roomCode);
+      if (controller.signal.aborted || room.status !== 'PREPARING_QUESTIONS') {
+        return;
+      }
+
+      this.batchAbortControllers.delete(room.roomCode);
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error(`[GameEngine] Failed to prepare AI batch for room ${room.roomCode}`, {
+        error: message,
+      });
+
+      room.status = 'PREPARATION_FAILED';
+      this.io.to(room.roomCode).emit('room_state_updated', this.sanitizeRoom(room));
+      this.io.to(room.roomCode).emit('questions_preparation_failed', {
+        error: message,
+        canRetry: true,
+        canUseOffline: true,
+      });
+    }
+  }
+
+  /**
+   * Retries AI question batch generation after failure.
+   */
+  public async retryAiGeneration(room: RoomState): Promise<void> {
+    if (room.status !== 'PREPARATION_FAILED') {
+      throw new Error(`Cannot retry question generation: Room is in ${room.status} status`);
+    }
+
+    const connectedPlayers = room.players.filter((p) => p.isConnected);
+    if (connectedPlayers.length < 2) {
+      throw new Error('Need at least 2 connected players to start the match');
+    }
+
+    const schedule = this.modeSchedules.get(room.roomCode) || [];
+    const triviaCount = schedule.filter((m) => m === 'trivia').length;
+    const rareCount = schedule.filter((m) => m === 'rare_answer').length;
+
+    room.status = 'PREPARING_QUESTIONS';
+    const primaryProviderName = aiGenerator.getPrimaryProviderName();
+
+    this.io.to(room.roomCode).emit('room_state_updated', this.sanitizeRoom(room));
+    this.io.to(room.roomCode).emit('questions_preparing', {
+      count: triviaCount + rareCount,
+      provider: primaryProviderName,
+    });
+
+    this.executeBatchPreparation(room, triviaCount, rareCount);
+  }
+
+  /**
+   * Host explicit choice: Play offline questions when AI generation fails.
+   */
+  public async useOfflineQuestions(room: RoomState): Promise<void> {
+    if (room.status !== 'PREPARATION_FAILED') {
+      throw new Error(`Cannot choose offline questions: Room is in ${room.status} status`);
+    }
+
+    const connectedPlayers = room.players.filter((p) => p.isConnected);
+    if (connectedPlayers.length < 2) {
+      throw new Error('Need at least 2 connected players to start the match');
+    }
+
+    const schedule = this.modeSchedules.get(room.roomCode) || [];
+    const triviaCount = schedule.filter((m) => m === 'trivia').length;
+    const rareCount = schedule.filter((m) => m === 'rare_answer').length;
+
+    try {
+      if (triviaCount > 0) {
+        const used = this.usedTriviaIds.get(room.roomCode) || new Set();
+        const batch = await aiGenerator.generateOfflineBatch(
+          triviaCount,
+          room.settings.difficulty || 'medium',
+          used,
+          room.roomCode
+        );
+        this.preparedTriviaBatches.set(room.roomCode, batch);
+      }
+
+      if (rareCount > 0) {
+        const usedRare = this.usedRareIds.get(room.roomCode) || new Set();
+        const rareBatch = await aiGenerator.generateOfflineRareBatch(
+          rareCount,
+          room.settings.difficulty || 'medium',
+          usedRare,
+          room.roomCode
+        );
+        this.preparedRareBatches.set(room.roomCode, rareBatch);
+      }
+
+      this.beginCountdown(room);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error(`[GameEngine] Failed to prepare offline batches for room ${room.roomCode}`, {
+        error: message,
+      });
+
+      room.status = 'PREPARATION_FAILED';
+      this.io.to(room.roomCode).emit('room_state_updated', this.sanitizeRoom(room));
+      this.io.to(room.roomCode).emit('questions_preparation_failed', {
+        error: message,
+        canRetry: true,
+        canUseOffline: false,
+      });
+    }
+  }
+
+  /**
+   * Host explicit choice: Cancel match preparation and return to lobby.
+   */
+  public cancelMatch(room: RoomState): void {
+    if (room.status !== 'PREPARING_QUESTIONS' && room.status !== 'PREPARATION_FAILED') {
+      throw new Error(`Cannot cancel match: Room is in ${room.status} status`);
+    }
+    this.cancelPendingBatch(room.roomCode);
+    this.returnToLobby(room);
+  }
+
+  private beginCountdown(room: RoomState): void {
+    aiGenerator.commitBatchReservation(room.roomCode).catch((err) => {
+      logger.warn(`[GameEngine] Failed to commit reservation for room ${room.roomCode}`, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+    room.status = 'COUNTDOWN';
     const now = Date.now();
     this.io.to(room.roomCode).emit('game_starting', {
       countdownMs: GAME_START_COUNTDOWN_MS,
@@ -149,10 +371,21 @@ export class GameEngine {
     });
   }
 
+  private cancelPendingBatch(roomCode: string): void {
+    const existing = this.batchAbortControllers.get(roomCode);
+    if (existing) {
+      existing.abort();
+      this.batchAbortControllers.delete(roomCode);
+    }
+    this.preparedTriviaBatches.delete(roomCode);
+    this.preparedRareBatches.delete(roomCode);
+    aiGenerator.releaseBatchReservation(roomCode).catch(() => {});
+  }
+
   /**
    * Initiates a synchronized round.
    */
-  public startRound(room: RoomState, roundNumber: number): void {
+  public async startRound(room: RoomState, roundNumber: number): Promise<void> {
     room.status = 'ROUND_ACTIVE';
     room.currentRound = roundNumber;
 
@@ -171,14 +404,26 @@ export class GameEngine {
     room.roundId = roundId;
 
     const startTime = Date.now();
+    const difficulty = room.settings.difficulty || 'medium';
     let durationMs: number;
 
     let secretChallenge: SecretChallenge;
     let clientChallenge: ActiveChallengeClient;
 
     if (mode === 'trivia') {
+      let question: TriviaQuestionServer | undefined;
+      const batch = this.preparedTriviaBatches.get(room.roomCode);
+      if (batch && batch.length > 0) {
+        question = batch.shift();
+      }
+
+      // Safety fallback if batch was empty
+      if (!question) {
+        const used = this.usedTriviaIds.get(room.roomCode) || new Set();
+        question = await aiGenerator.generateTriviaQuestion(difficulty, used, room.roomCode);
+      }
+
       const used = this.usedTriviaIds.get(room.roomCode) || new Set();
-      const question = getRandomTriviaQuestion(used);
       used.add(question.id);
       this.usedTriviaIds.set(room.roomCode, used);
 
@@ -193,10 +438,11 @@ export class GameEngine {
           question: question.question,
           options: question.options,
           durationMs,
+          difficulty: question.difficulty,
         },
       };
     } else if (mode === 'math') {
-      const math = generateMathQuestion(roundNumber);
+      const math = generateMathQuestion(roundNumber, difficulty);
       secretChallenge = { mode: 'math', serverChallenge: math };
       durationMs = math.durationMs || DEFAULT_QUESTION_DURATION_MS;
 
@@ -210,7 +456,7 @@ export class GameEngine {
         },
       };
     } else if (mode === 'memory') {
-      const memory = generateMemoryChallenge(roundNumber, startTime);
+      const memory = generateMemoryChallenge(roundNumber, startTime, difficulty);
       secretChallenge = { mode: 'memory', serverChallenge: memory };
       durationMs = memory.viewingDurationMs + memory.inputDurationMs;
 
@@ -228,9 +474,34 @@ export class GameEngine {
           revealDurationMs: memory.revealDurationMs,
         },
       };
+    } else if (mode === 'rare_answer') {
+      const used = this.usedRareIds.get(room.roomCode) || new Set();
+      let rare: RareAnswerChallengeServer;
+      const preparedBatch = this.preparedRareBatches.get(room.roomCode);
+      if (preparedBatch && preparedBatch.length > 0) {
+        rare = preparedBatch.shift()!;
+      } else {
+        rare = await aiGenerator.generateRareAnswerChallenge(difficulty, used, room.roomCode);
+      }
+      used.add(rare.id);
+      this.usedRareIds.set(room.roomCode, used);
+
+      secretChallenge = { mode: 'rare_answer', serverChallenge: rare };
+      durationMs = rare.durationMs || RARE_ANSWER_ROUND_DURATION_MS;
+
+      clientChallenge = {
+        mode: 'rare_answer',
+        challenge: {
+          id: rare.id,
+          category: rare.category,
+          prompt: rare.prompt,
+          difficulty: rare.difficulty,
+          durationMs,
+        },
+      };
     } else {
       // Reaction
-      const rx = generateReactionChallenge(startTime);
+      const rx = generateReactionChallenge(startTime, difficulty);
       secretChallenge = { mode: 'reaction', serverChallenge: rx };
       durationMs = rx.waitDelayMs + rx.timeoutMs;
 
@@ -288,6 +559,7 @@ export class GameEngine {
       answer?: number;
       selectedIndices?: number[];
       sequence?: string[];
+      textAnswer?: string;
       clientTimeMs: number;
     }
   ): { success: boolean; error?: string } {
@@ -307,13 +579,33 @@ export class GameEngine {
       return { success: false, error: 'Submission received after round ended' };
     }
 
-    // Check idempotency (prevent multiple submissions for the same round)
+    const secret = this.secretChallenges.get(room.roomCode);
+
+    // In Rare Answer, allow edits until the server deadline
+    if (secret?.mode === 'rare_answer' || room.activeMode === 'rare_answer') {
+      const roomSubmissions = this.submissions.get(room.roomCode) || new Map();
+      const playerSub: PlayerSubmission = {
+        playerId,
+        roundId: room.roundId || '',
+        receivedAt: now,
+        textAnswer: submission.textAnswer?.trim(),
+        falseStart: false,
+      };
+      roomSubmissions.set(playerId, playerSub);
+      this.submissions.set(room.roomCode, roomSubmissions);
+
+      // Acknowledge submission to all players without revealing the answer
+      this.io.to(room.roomCode).emit('submission_acknowledged', { playerId });
+
+      // Edits allowed until deadline: do NOT conclude round early
+      return { success: true };
+    }
+
+    // Check idempotency (prevent multiple submissions for non-editable rounds)
     const roomSubmissions = this.submissions.get(room.roomCode) || new Map();
     if (roomSubmissions.has(playerId)) {
       return { success: false, error: 'Answer already submitted for this round' };
     }
-
-    const secret = this.secretChallenges.get(room.roomCode);
 
     // Prevent early submission and replay exploits in Memory mode
     if (secret?.mode === 'memory' && secret.serverChallenge.viewingEndTime) {
@@ -340,6 +632,7 @@ export class GameEngine {
       answer: submission.answer,
       selectedIndices: submission.selectedIndices,
       sequence: submission.sequence,
+      textAnswer: submission.textAnswer?.trim(),
       falseStart,
     };
 
@@ -369,9 +662,18 @@ export class GameEngine {
     }
 
     this.clearTimer(room.roomCode);
-    room.status = 'ROUND_RECAP';
-
     const secret = this.secretChallenges.get(room.roomCode);
+
+    if (secret?.mode === 'rare_answer') {
+      this.handleRareAnswerRoundEnd(room, roundId, secret.serverChallenge);
+      return;
+    }
+
+    room.status = 'ROUND_RECAP';
+    this.resolveRoundRecap(room, roundId, secret);
+  }
+
+  private resolveRoundRecap(room: RoomState, roundId: string, secret?: SecretChallenge): void {
     const roomSubmissions = this.submissions.get(room.roomCode) || new Map();
     const prevRanks = this.previousRanks.get(room.roomCode) || new Map();
 
@@ -380,6 +682,7 @@ export class GameEngine {
     const pointsEarnedMap = new Map<string, number>();
     const isCorrectMap = new Map<string, boolean>();
     const timeSpentMap = new Map<string, number | undefined>();
+    const rarityCountMap = new Map<string, number | undefined>();
 
     // Calculate score for each player
     room.players.forEach((player) => {
@@ -521,6 +824,8 @@ export class GameEngine {
         isCorrect: isCorrectMap.get(player.id) || false,
         timeSpentMs: timeSpentMap.get(player.id),
         falseStart: sub?.falseStart,
+        submittedAnswerText: sub?.textAnswer,
+        rarityCount: rarityCountMap.get(player.id),
       });
     });
 
@@ -535,6 +840,7 @@ export class GameEngine {
       roundNumber: room.currentRound,
       totalRounds: room.totalRounds,
       mode: room.activeMode || 'trivia',
+      difficulty: room.settings.difficulty,
       results,
       triviaRevealIndex:
         secret?.mode === 'trivia' ? secret.serverChallenge.correctIndex : undefined,
@@ -549,6 +855,10 @@ export class GameEngine {
       memorySequence:
         secret?.mode === 'memory' ? secret.serverChallenge.solutionSequence : undefined,
       reactionFastestMs: fastestReaction,
+      rareAnswerPrompt:
+        secret?.mode === 'rare_answer' ? secret.serverChallenge.prompt : undefined,
+      rareAnswerAcceptedList:
+        secret?.mode === 'rare_answer' ? secret.serverChallenge.acceptableAnswers.slice(0, 15) : undefined,
       networkNotice:
         secret?.mode === 'reaction'
           ? secret.serverChallenge.networkNotice
@@ -560,6 +870,8 @@ export class GameEngine {
           ? `Verified solution: ${secret.serverChallenge.correctAnswer}`
           : secret?.mode === 'memory'
           ? `Target sequence: ${secret.serverChallenge.solutionSequence?.join(' → ')}`
+          : secret?.mode === 'rare_answer'
+          ? `Category: ${secret.serverChallenge.category} — Rarer answers earn higher bonuses.`
           : 'Internet reaction rankings are calibrated for casual play; physical ping latency can affect reaction times.',
     };
 
@@ -577,6 +889,158 @@ export class GameEngine {
         this.endGame(room);
       }
     });
+  }
+
+  /**
+   * Handles asynchronous batch judging and uniqueness scoring for Rare Answer rounds.
+   */
+  private async handleRareAnswerRoundEnd(
+    room: RoomState,
+    roundId: string,
+    challenge: RareAnswerChallengeServer
+  ): Promise<void> {
+    room.status = 'JUDGING_ANSWERS';
+    this.io.to(room.roomCode).emit('room_state_updated', this.sanitizeRoom(room));
+    this.io.to(room.roomCode).emit('rare_answer_judging', {
+      prompt: challenge.prompt,
+      roundNumber: room.currentRound,
+    });
+
+    const roomSubmissions = this.submissions.get(room.roomCode) || new Map();
+    const submissionsList = room.players.map((p) => ({
+      playerId: p.id,
+      text: roomSubmissions.get(p.id)?.textAnswer,
+    }));
+
+    try {
+      const judgingResult = await aiGenerator.judgeRareAnswerBatch({
+        prompt: challenge.prompt,
+        category: challenge.category,
+        difficulty: challenge.difficulty,
+        acceptableAnswers: challenge.acceptableAnswers,
+        submissions: submissionsList,
+      });
+
+      if (judgingResult.isVoided) {
+        const voidCount = (this.voidReplacementsCount.get(room.roomCode) || 0) + 1;
+        this.voidReplacementsCount.set(room.roomCode, voidCount);
+
+        if (voidCount <= 2) {
+          this.io.to(room.roomCode).emit('round_voided', {
+            reason: judgingResult.voidReason || 'Round could not be judged fairly',
+            replacementOffered: true,
+          });
+
+          // Queue replacement challenge for current round
+          setTimeout(() => {
+            this.startRound(room, room.currentRound);
+          }, 2500);
+          return;
+        } else {
+          this.io.to(room.roomCode).emit('round_voided', {
+            reason: judgingResult.voidReason || 'Round voided: maximum replacements reached',
+            replacementOffered: false,
+          });
+        }
+      }
+
+      // Update player scores, stats, and streaks
+      const results: PlayerRoundResult[] = [];
+      const prevRanks = this.previousRanks.get(room.roomCode) || new Map();
+      const rareAnswerSubmissions: RareAnswerSubmissionResult[] = [];
+
+      for (const sub of judgingResult.judgedSubmissions) {
+        const player = room.players.find((p) => p.id === sub.playerId);
+        if (!player) continue;
+
+        player.score += sub.pointsEarned;
+        player.stats.rareAnswerTotal++;
+        if (sub.isValid) {
+          player.stats.rareAnswerCorrect++;
+          player.streak++;
+          player.stats.highestStreak = Math.max(player.stats.highestStreak, player.streak);
+        } else {
+          player.streak = 0;
+        }
+
+        rareAnswerSubmissions.push({
+          playerId: sub.playerId,
+          nickname: player.nickname,
+          avatar: player.avatar,
+          answer: sub.rawAnswer,
+          isValid: sub.isValid,
+          canonicalAnswer: sub.canonicalAnswer,
+          duplicateCount: sub.duplicateCount,
+          pointsEarned: sub.pointsEarned,
+          explanation: sub.explanation,
+        });
+      }
+
+      // Compute updated ranks using deterministicPlayerSort
+      const sortedPlayers = [...room.players].sort(deterministicPlayerSort);
+      const currentRanks = new Map<string, number>();
+      sortedPlayers.forEach((p, idx) => currentRanks.set(p.id, idx + 1));
+
+      sortedPlayers.forEach((player) => {
+        const sub = judgingResult.judgedSubmissions.find((j) => j.playerId === player.id);
+        const curRank = currentRanks.get(player.id) || 1;
+        const prevRank = prevRanks.get(player.id) || curRank;
+        const rankDelta = prevRank - curRank;
+
+        results.push({
+          playerId: player.id,
+          nickname: player.nickname,
+          avatar: player.avatar,
+          pointsEarned: sub?.pointsEarned || 0,
+          totalScore: player.score,
+          rank: curRank,
+          rankDelta,
+          isCorrect: Boolean(sub?.isValid),
+          submittedAnswerText: sub?.rawAnswer,
+          rarityCount: sub?.duplicateCount,
+        });
+      });
+
+      this.previousRanks.set(room.roomCode, currentRanks);
+
+      room.status = 'ROUND_RECAP';
+      const recapData: RoundRecapData = {
+        roundNumber: room.currentRound,
+        totalRounds: room.totalRounds,
+        mode: 'rare_answer',
+        difficulty: challenge.difficulty,
+        results,
+        rareAnswerPrompt: challenge.prompt,
+        rareAnswerAcceptedList: challenge.acceptableAnswers.slice(0, 15),
+        rareAnswerSubmissions,
+        explanation: 'Scoring: Math.round(100 / countOfEquivalentAnswers). Solo = 100 pts, 2 matches = 50 pts, 3 matches = 33 pts. 0 pts for invalid or blank.',
+      };
+
+      this.lastRecaps.set(room.roomCode, recapData);
+      this.io.to(room.roomCode).emit('round_recap', recapData);
+      this.io.to(room.roomCode).emit('room_state_updated', this.sanitizeRoom(room));
+
+      this.scheduleTimer(room.roomCode, ROUND_RECAP_DURATION_MS, () => {
+        if (room.currentRound < room.totalRounds) {
+          this.startRound(room, room.currentRound + 1);
+        } else {
+          this.endGame(room);
+        }
+      });
+    } catch (err: unknown) {
+      logger.error(`[GameEngine] Rare Answer judging crashed:`, { error: err });
+      this.io.to(room.roomCode).emit('round_voided', {
+        reason: 'Internal judging error occurred. Round voided.',
+        replacementOffered: false,
+      });
+      this.scheduleTimer(room.roomCode, 2000, () => {
+        if (room.currentRound < room.totalRounds) {
+          this.startRound(room, room.currentRound + 1);
+        } else {
+          this.endGame(room);
+        }
+      });
+    }
   }
 
   /**
@@ -655,6 +1119,9 @@ export class GameEngine {
    */
   public returnToLobby(room: RoomState): void {
     this.clearTimer(room.roomCode);
+    this.cancelPendingBatch(room.roomCode);
+    this.preparedTriviaBatches.delete(room.roomCode);
+    this.preparedRareBatches.delete(room.roomCode);
     room.status = 'LOBBY';
     room.currentRound = 1;
     room.roundId = null;
@@ -673,6 +1140,8 @@ export class GameEngine {
         mathTotal: 0,
         memoryPerfectCount: 0,
         fastestReactionMs: null,
+        rareAnswerCorrect: 0,
+        rareAnswerTotal: 0,
         highestStreak: 0,
       };
     });
@@ -680,7 +1149,8 @@ export class GameEngine {
     this.submissions.delete(room.roomCode);
     this.secretChallenges.delete(room.roomCode);
     this.previousRanks.delete(room.roomCode);
-    this.usedTriviaIds.delete(room.roomCode);
+    // Note: usedTriviaIds and usedRareIds are intentionally PRESERVED across rematches
+    // so duplicate prevention maintains recent room history
     this.modeSchedules.delete(room.roomCode);
     this.clientChallenges.delete(room.roomCode);
     this.lastRecaps.delete(room.roomCode);
@@ -716,12 +1186,16 @@ export class GameEngine {
 
   /**
    * Provides a full snapshot of the match state for a reconnecting player.
+   * Prevents answer leakage by only revealing who submitted without exposing answers.
    */
-  public getReconnectionSnapshot(room: RoomState): {
+  public getReconnectionSnapshot(room: RoomState, requestingPlayerId?: string): {
     activeChallenge?: ActiveChallengeClient;
     remainingMs?: number;
     roundRecap?: RoundRecapData;
     podiumData?: GameOverPodiumData;
+    submittedPlayerIds?: string[];
+    mySubmittedAnswer?: string;
+    isJudging?: boolean;
   } {
     const now = Date.now();
     let remainingMs: number | undefined;
@@ -729,15 +1203,32 @@ export class GameEngine {
       remainingMs = Math.max(0, room.roundEndTime - now);
     }
 
+    const roomSubs = this.submissions.get(room.roomCode);
+    const submittedPlayerIds = roomSubs ? Array.from(roomSubs.keys()) : [];
+    const mySub = requestingPlayerId && roomSubs ? roomSubs.get(requestingPlayerId)?.textAnswer : undefined;
+
     return {
       activeChallenge:
-        room.status === 'ROUND_ACTIVE' ? this.clientChallenges.get(room.roomCode) : undefined,
+        room.status === 'ROUND_ACTIVE' || room.status === 'JUDGING_ANSWERS'
+          ? this.clientChallenges.get(room.roomCode)
+          : undefined,
       remainingMs,
       roundRecap:
         room.status === 'ROUND_RECAP' ? this.lastRecaps.get(room.roomCode) : undefined,
       podiumData:
         room.status === 'GAME_OVER' ? this.lastPodiums.get(room.roomCode) : undefined,
+      submittedPlayerIds:
+        room.status === 'ROUND_ACTIVE' || room.status === 'JUDGING_ANSWERS' ? submittedPlayerIds : undefined,
+      mySubmittedAnswer: mySub,
+      isJudging: room.status === 'JUDGING_ANSWERS',
     };
+  }
+
+  /**
+   * Retrieves secret server challenge for tests or internal inspection.
+   */
+  public getSecretChallenge(roomCode: string): SecretChallenge | undefined {
+    return this.secretChallenges.get(roomCode);
   }
 
   /**
@@ -748,14 +1239,28 @@ export class GameEngine {
   }
 
   /**
+   * Retrieves count of voided round replacements for a room.
+   */
+  public getVoidReplacementsCount(roomCode: string): number {
+    return this.voidReplacementsCount.get(roomCode) || 0;
+  }
+
+  /**
    * Cleans all in-memory resources associated with an ended or purged room.
    */
   public cleanRoom(roomCode: string): void {
     this.clearTimer(roomCode);
+    this.cancelPendingBatch(roomCode);
+    this.preparedTriviaBatches.delete(roomCode);
+    this.preparedRareBatches.delete(roomCode);
+    this.voidReplacementsCount.delete(roomCode);
     this.secretChallenges.delete(roomCode);
     this.submissions.delete(roomCode);
     this.previousRanks.delete(roomCode);
     this.usedTriviaIds.delete(roomCode);
+    this.usedRareIds.delete(roomCode);
+    duplicatePrevention.clearRoom(roomCode).catch(() => {});
+    aiGenerator.releaseBatchReservation(roomCode).catch(() => {});
     this.modeSchedules.delete(roomCode);
     this.clientChallenges.delete(roomCode);
     this.lastRecaps.delete(roomCode);
@@ -793,6 +1298,9 @@ export class GameEngine {
   public clearAll() {
     this.activeTimers.forEach((t) => clearTimeout(t));
     this.activeTimers.clear();
+    this.batchAbortControllers.forEach((c) => c.abort());
+    this.batchAbortControllers.clear();
+    this.preparedTriviaBatches.clear();
     this.secretChallenges.clear();
     this.submissions.clear();
     this.previousRanks.clear();

@@ -35,9 +35,21 @@ export interface GameContextValue {
   submitMath: (answer: number) => Promise<{ success: boolean; error?: string }>;
   submitMemory: (input: number[] | string[]) => Promise<{ success: boolean; error?: string }>;
   submitReaction: () => Promise<{ success: boolean; error?: string }>;
+  submitRareAnswer: (answer: string) => Promise<{ success: boolean; error?: string }>;
   playAgain: () => Promise<{ success: boolean; error?: string }>;
   returnToLobby: () => Promise<{ success: boolean; error?: string }>;
+  retryAiGeneration: () => Promise<{ success: boolean; error?: string }>;
+  useOfflineQuestions: () => Promise<{ success: boolean; error?: string }>;
+  cancelMatch: () => Promise<{ success: boolean; error?: string }>;
+  preparingInfo: { count: number; provider: string } | null;
+  preparationError: { error: string; canRetry: boolean; canUseOffline: boolean } | null;
   clockOffsetMs: number;
+  submittedPlayerIds: Set<string>;
+  isJudging: boolean;
+  voidNotice: string | null;
+  clearVoidNotice: () => void;
+  mySubmittedAnswer: string | null;
+  setMySubmittedAnswer: (answer: string | null) => void;
   // Demo State Setters (for UI isolated testing)
   setCurrentRoom: React.Dispatch<React.SetStateAction<RoomState | null>>;
   setCurrentPlayer: React.Dispatch<React.SetStateAction<Player | null>>;
@@ -72,9 +84,23 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [podiumData, setPodiumData] = useState<GameOverPodiumData | null>(null);
   const [isMuted, setIsMuted] = useState<boolean>(sounds.getMuted());
   const [clockOffsetMs, setClockOffsetMs] = useState<number>(0);
+  const [preparingInfo, setPreparingInfo] = useState<{ count: number; provider: string } | null>(null);
+  const [preparationError, setPreparationError] = useState<{
+    error: string;
+    canRetry: boolean;
+    canUseOffline: boolean;
+  } | null>(null);
+  const [submittedPlayerIds, setSubmittedPlayerIds] = useState<Set<string>>(new Set());
+  const [isJudging, setIsJudging] = useState<boolean>(false);
+  const [voidNotice, setVoidNotice] = useState<string | null>(null);
+  const [mySubmittedAnswer, setMySubmittedAnswer] = useState<string | null>(null);
 
   const clearServerRestartNotice = useCallback(() => {
     setServerRestartNotice(null);
+  }, []);
+
+  const clearVoidNotice = useCallback(() => {
+    setVoidNotice(null);
   }, []);
 
   // Socket Lifecycle Listeners
@@ -126,6 +152,15 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             if (res.data.podiumData) {
               setPodiumData(res.data.podiumData);
             }
+            if (res.data.submittedPlayerIds) {
+              setSubmittedPlayerIds(new Set(res.data.submittedPlayerIds));
+            }
+            if (res.data.isJudging !== undefined) {
+              setIsJudging(res.data.isJudging);
+            }
+            if (res.data.mySubmittedAnswer !== undefined) {
+              setMySubmittedAnswer(res.data.mySubmittedAnswer);
+            }
           } else {
             // Expired, invalid session, or server restart
             sessionStorage.removeItem('mind_clash_room_code');
@@ -153,10 +188,23 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     function onRoomStateUpdated(updatedRoom: RoomState) {
       setCurrentRoom(updatedRoom);
+      if (updatedRoom.status !== 'PREPARING_QUESTIONS') {
+        setPreparingInfo(null);
+      }
+      if (updatedRoom.status !== 'PREPARATION_FAILED') {
+        setPreparationError(null);
+      }
       if (updatedRoom.status === 'LOBBY') {
         setActiveChallenge(null);
         setRoundRecap(null);
         setPodiumData(null);
+        setSubmittedPlayerIds(new Set());
+        setIsJudging(false);
+        setVoidNotice(null);
+        setMySubmittedAnswer(null);
+      }
+      if (updatedRoom.status === 'ROUND_ACTIVE') {
+        setIsJudging(false);
       }
       const savedPlayerId = sessionStorage.getItem('mind_clash_player_id');
       const me = updatedRoom.players.find(
@@ -165,6 +213,19 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       if (me) {
         setCurrentPlayer(me);
       }
+    }
+
+    function onQuestionsPreparing(data: { count: number; provider: string }) {
+      setPreparingInfo(data);
+      setPreparationError(null);
+    }
+
+    function onQuestionsPreparationFailed(data: {
+      error: string;
+      canRetry: boolean;
+      canUseOffline: boolean;
+    }) {
+      setPreparationError(data);
     }
 
     function onPlayerJoined(_player: Player) {
@@ -179,6 +240,22 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       sounds.playSuccess();
     }
 
+    function onSubmissionAcknowledged(data: { playerId: string }) {
+      setSubmittedPlayerIds((prev) => new Set(prev).add(data.playerId));
+      sounds.playClick();
+    }
+
+    function onRareAnswerJudging(_data: { prompt: string; roundNumber: number }) {
+      setIsJudging(true);
+      sounds.playClick();
+    }
+
+    function onRoundVoided(data: { reason: string; replacementOffered: boolean }) {
+      setIsJudging(false);
+      setVoidNotice(data.reason || 'Round was voided and a replacement round has been offered.');
+      sounds.playError();
+    }
+
     function onRoundStarted(data: {
       round: number;
       totalRounds: number;
@@ -190,6 +267,12 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }) {
       setActiveChallenge(data.activeChallenge);
       setRoundRecap(null);
+      setPreparingInfo(null);
+      setPreparationError(null);
+      setSubmittedPlayerIds(new Set());
+      setIsJudging(false);
+      setVoidNotice(null);
+      setMySubmittedAnswer(null);
       sounds.playClick();
       const clientNow = Date.now();
       setClockOffsetMs(data.serverTime - clientNow);
@@ -197,6 +280,7 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     function onRoundRecap(recap: RoundRecapData) {
       setRoundRecap(recap);
+      setIsJudging(false);
       sounds.playSuccess();
     }
 
@@ -218,9 +302,14 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('room_state_updated', onRoomStateUpdated);
+    socket.on('questions_preparing', onQuestionsPreparing);
+    socket.on('questions_preparation_failed', onQuestionsPreparationFailed);
     socket.on('player_joined', onPlayerJoined);
     socket.on('player_left', onPlayerLeft);
     socket.on('player_reconnected', onPlayerReconnected);
+    socket.on('submission_acknowledged', onSubmissionAcknowledged);
+    socket.on('rare_answer_judging', onRareAnswerJudging);
+    socket.on('round_voided', onRoundVoided);
     socket.on('round_started', onRoundStarted);
     socket.on('round_recap', onRoundRecap);
     socket.on('game_over', onGameOver);
@@ -234,9 +323,14 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
       socket.off('room_state_updated', onRoomStateUpdated);
+      socket.off('questions_preparing', onQuestionsPreparing);
+      socket.off('questions_preparation_failed', onQuestionsPreparationFailed);
       socket.off('player_joined', onPlayerJoined);
       socket.off('player_left', onPlayerLeft);
       socket.off('player_reconnected', onPlayerReconnected);
+      socket.off('submission_acknowledged', onSubmissionAcknowledged);
+      socket.off('rare_answer_judging', onRareAnswerJudging);
+      socket.off('round_voided', onRoundVoided);
       socket.off('round_started', onRoundStarted);
       socket.off('round_recap', onRoundRecap);
       socket.off('game_over', onGameOver);
@@ -281,6 +375,8 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
                 memoryPerfectCount: 0,
                 fastestReactionMs: null,
                 highestStreak: 0,
+                rareAnswerCorrect: 0,
+                rareAnswerTotal: 0,
               },
             };
 
@@ -326,6 +422,8 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
                 memoryPerfectCount: 0,
                 fastestReactionMs: null,
                 highestStreak: 0,
+                rareAnswerCorrect: 0,
+                rareAnswerTotal: 0,
               },
             };
 
@@ -372,6 +470,15 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           }
           if (res.data.podiumData) {
             setPodiumData(res.data.podiumData);
+          }
+          if (res.data.submittedPlayerIds) {
+            setSubmittedPlayerIds(new Set(res.data.submittedPlayerIds));
+          }
+          if (res.data.isJudging !== undefined) {
+            setIsJudging(res.data.isJudging);
+          }
+          if (res.data.mySubmittedAnswer !== undefined) {
+            setMySubmittedAnswer(res.data.mySubmittedAnswer);
           }
           resolve({ success: true });
         } else {
@@ -497,6 +604,21 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     });
   }, []);
 
+  // Submit Rare Answer
+  const submitRareAnswer = useCallback(
+    (answer: string): Promise<{ success: boolean; error?: string }> => {
+      return new Promise((resolve) => {
+        socket.emit('submit_rare_answer', { answer, clientTimeMs: Date.now() }, (res) => {
+          if (res?.success) {
+            setMySubmittedAnswer(answer);
+          }
+          resolve({ success: !!res?.success, error: res?.error });
+        });
+      });
+    },
+    []
+  );
+
   // Play Again (Rematch)
   const playAgain = useCallback((): Promise<{ success: boolean; error?: string }> => {
     return new Promise((resolve) => {
@@ -510,6 +632,33 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const returnToLobby = useCallback((): Promise<{ success: boolean; error?: string }> => {
     return new Promise((resolve) => {
       socket.emit('return_to_lobby', (res) => {
+        resolve({ success: !!res?.success, error: res?.error });
+      });
+    });
+  }, []);
+
+  // Retry AI Generation (Host only)
+  const retryAiGeneration = useCallback((): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      socket.emit('retry_ai_generation', (res) => {
+        resolve({ success: !!res?.success, error: res?.error });
+      });
+    });
+  }, []);
+
+  // Use Offline Questions Choice (Host only)
+  const useOfflineQuestions = useCallback((): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      socket.emit('use_offline_questions', (res) => {
+        resolve({ success: !!res?.success, error: res?.error });
+      });
+    });
+  }, []);
+
+  // Cancel Match Preparation (Host only)
+  const cancelMatch = useCallback((): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      socket.emit('cancel_match', (res) => {
         resolve({ success: !!res?.success, error: res?.error });
       });
     });
@@ -534,6 +683,8 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         memoryPerfectCount: 1,
         fastestReactionMs: 238,
         highestStreak: 3,
+        rareAnswerCorrect: 1,
+        rareAnswerTotal: 1,
       },
     };
 
@@ -556,6 +707,8 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           memoryPerfectCount: 0,
           fastestReactionMs: 254,
           highestStreak: 2,
+          rareAnswerCorrect: 1,
+          rareAnswerTotal: 1,
         },
       },
       {
@@ -575,6 +728,8 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           memoryPerfectCount: 1,
           fastestReactionMs: 310,
           highestStreak: 1,
+          rareAnswerCorrect: 0,
+          rareAnswerTotal: 1,
         },
       },
     ];
@@ -589,7 +744,8 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       activeMode: 'trivia',
       settings: {
         roundCount: 5,
-        selectedModes: ['trivia', 'math', 'memory', 'reaction'],
+        selectedModes: ['trivia', 'math', 'memory', 'reaction', 'rare_answer'],
+        difficulty: 'medium',
       },
     };
 
@@ -623,9 +779,21 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         submitMath,
         submitMemory,
         submitReaction,
+        submitRareAnswer,
         playAgain,
         returnToLobby,
+        retryAiGeneration,
+        useOfflineQuestions,
+        cancelMatch,
+        preparingInfo,
+        preparationError,
         clockOffsetMs,
+        submittedPlayerIds,
+        isJudging,
+        voidNotice,
+        clearVoidNotice,
+        mySubmittedAnswer,
+        setMySubmittedAnswer,
         setCurrentRoom,
         setCurrentPlayer,
         setActiveChallenge,

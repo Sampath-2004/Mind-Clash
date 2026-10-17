@@ -122,6 +122,8 @@ export const PodiumPage: React.FC = () => {
         memoryPerfectCount: 1,
         fastestReactionMs: 214,
         highestStreak: 5,
+        rareAnswerCorrect: 1,
+        rareAnswerTotal: 1,
       },
     },
     {
@@ -141,6 +143,8 @@ export const PodiumPage: React.FC = () => {
         memoryPerfectCount: 0,
         fastestReactionMs: 240,
         highestStreak: 3,
+        rareAnswerCorrect: 1,
+        rareAnswerTotal: 1,
       },
     },
     {
@@ -160,6 +164,8 @@ export const PodiumPage: React.FC = () => {
         memoryPerfectCount: 1,
         fastestReactionMs: 290,
         highestStreak: 2,
+        rareAnswerCorrect: 0,
+        rareAnswerTotal: 1,
       },
     },
   ];

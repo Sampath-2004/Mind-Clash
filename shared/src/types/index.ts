@@ -1,10 +1,15 @@
-export type GameMode = 'trivia' | 'math' | 'memory' | 'reaction';
+export type GameMode = 'trivia' | 'math' | 'memory' | 'reaction' | 'rare_answer';
+
+export type Difficulty = 'easy' | 'medium' | 'hard';
 
 export type RoomStatus =
   | 'LOBBY'
+  | 'PREPARING_QUESTIONS'
+  | 'PREPARATION_FAILED'
   | 'COUNTDOWN'
   | 'ROUND_INTRO'
   | 'ROUND_ACTIVE'
+  | 'JUDGING_ANSWERS'
   | 'ROUND_RECAP'
   | 'GAME_OVER';
 
@@ -15,6 +20,8 @@ export interface PlayerStats {
   mathTotal: number;
   memoryPerfectCount: number;
   fastestReactionMs: number | null;
+  rareAnswerCorrect: number;
+  rareAnswerTotal: number;
   highestStreak: number;
 }
 
@@ -34,6 +41,7 @@ export interface Player {
 export interface RoomSettings {
   roundCount: number;
   selectedModes: GameMode[];
+  difficulty: Difficulty;
 }
 
 export interface TriviaQuestionClient {
@@ -42,6 +50,7 @@ export interface TriviaQuestionClient {
   question: string;
   options: string[];
   durationMs: number;
+  difficulty?: Difficulty;
 }
 
 export interface TriviaQuestionServer extends TriviaQuestionClient {
@@ -96,11 +105,25 @@ export interface ReactionChallengeServer extends ReactionChallengeClient {
   triggerTimestamp: number; // Server timestamp when target activates
 }
 
+export interface RareAnswerChallengeClient {
+  id: string;
+  category: string;
+  prompt: string;
+  difficulty: Difficulty;
+  durationMs: number;
+  sampleAcceptableHint?: string;
+}
+
+export interface RareAnswerChallengeServer extends RareAnswerChallengeClient {
+  acceptableAnswers: string[];
+}
+
 export type ActiveChallengeClient =
   | { mode: 'trivia'; challenge: TriviaQuestionClient }
   | { mode: 'math'; challenge: MathQuestionClient }
   | { mode: 'memory'; challenge: MemoryChallengeClient }
-  | { mode: 'reaction'; challenge: ReactionChallengeClient };
+  | { mode: 'reaction'; challenge: ReactionChallengeClient }
+  | { mode: 'rare_answer'; challenge: RareAnswerChallengeClient };
 
 export interface PlayerRoundResult {
   playerId: string;
@@ -113,12 +136,27 @@ export interface PlayerRoundResult {
   isCorrect: boolean;
   timeSpentMs?: number;
   falseStart?: boolean;
+  submittedAnswerText?: string;
+  rarityCount?: number;
+}
+
+export interface RareAnswerSubmissionResult {
+  playerId: string;
+  nickname: string;
+  avatar: string;
+  answer: string;
+  isValid: boolean;
+  canonicalAnswer?: string;
+  duplicateCount: number;
+  pointsEarned: number;
+  explanation?: string;
 }
 
 export interface RoundRecapData {
   roundNumber: number;
   totalRounds: number;
   mode: GameMode;
+  difficulty?: Difficulty;
   results: PlayerRoundResult[];
   triviaRevealIndex?: number;
   triviaCorrectText?: string;
@@ -126,6 +164,12 @@ export interface RoundRecapData {
   memorySolution?: number[];
   memorySequence?: string[];
   reactionFastestMs?: number;
+  rareAnswerPrompt?: string;
+  rareAnswerAcceptedList?: string[];
+  rareAnswerSubmittedMap?: Record<string, { answer: string; isValid: boolean; duplicateCount: number; bonus: number }>;
+  rareAnswerSubmissions?: RareAnswerSubmissionResult[];
+  isVoided?: boolean;
+  voidReason?: string;
   networkNotice?: string;
   explanation?: string;
 }

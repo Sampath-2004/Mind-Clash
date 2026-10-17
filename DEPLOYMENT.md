@@ -47,17 +47,48 @@ graph LR
 
 ---
 
-## 4. Required Environment Variables
+## 4. Required & Optional Environment Variables
 
-Configure the following environment variables in your platform dashboard:
+Configure the following environment variables in your platform dashboard (e.g., Render Environment settings):
+
+### Core Runtime & Networking
+| Variable | Recommended / Default | Description |
+| :--- | :--- | :--- |
+| `NODE_ENV` | `production` | Enforces production mode, disables debug logging, strips localhost CORS entries. |
+| `PORT` | *(Injected by host)* | Render/Railway automatically injects `PORT` (e.g. `10000`). Binds to `0.0.0.0:${PORT}`. |
+| `CLIENT_ORIGIN` | `https://<your-service>.onrender.com` | Allowed origin(s) for CORS. Auto-detects Render and Railway public URLs when set. |
+| `MAX_ROOM_IDLE_MINUTES` | `15` | Minutes of inactivity before abandoned rooms are swept from memory. |
+| `VITE_PUBLIC_URL` | `https://<your-service>.onrender.com` | *(Optional)* Canonical public URL for room invite links (defaults to browser `origin`). |
+
+### AI Question Generation & Judging (Server-Only)
+> [!NOTE]
+> Keep API keys exclusively on the server. Never expose them through `VITE_` variables, client code, or version control.
+> If neither key is configured, the server gracefully falls back to the curated offline question catalog.
 
 | Variable | Recommended Value | Description |
 | :--- | :--- | :--- |
-| `NODE_ENV` | `production` | Enables production security mode, disables verbose logging, enforces strict CORS. |
-| `PORT` | *(Provided by host)* | Render and Railway automatically inject `PORT` (e.g. 10000 on Render). Defaults to `3001` if unset. |
-| `CLIENT_ORIGIN` | `https://<your-deployment-url>` | Allowed origin(s) for CORS. (The server automatically permits Render's `RENDER_EXTERNAL_URL`, `RENDER_EXTERNAL_HOSTNAME`, `*.onrender.com`, and Railway's `RAILWAY_PUBLIC_DOMAIN`). |
-| `MAX_ROOM_IDLE_MINUTES` | `15` | Minutes of inactivity before abandoned rooms and disconnected player sessions are purged from memory. |
-| `VITE_PUBLIC_URL` | `https://<your-deployment-url>` | *(Optional)* Explicit public website URL for room invite links (defaults to current browser origin `window.location.origin`). |
+| `GEMINI_API_KEY` | `<your-gemini-api-key>` | Primary provider API key for Trivia generation and Rare Answer judging. |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Configurable Google Gemini model identifier (default: `gemini-2.5-flash`). |
+| `OPENAI_API_KEY` | `<your-openai-api-key>` | Automatic failover provider API key if Gemini times out, errors, or hits quota. |
+| `OPENAI_MODEL` | `gpt-4o-mini` | Configurable OpenAI model identifier (default: `gpt-4o-mini`). |
+
+### AI Usage-Budget & Concurrency Limits
+| Variable | Default Value | Description |
+| :--- | :--- | :--- |
+| `AI_MAX_CONCURRENT_BATCHES` | `5` | Maximum simultaneous AI batch generation requests across rooms to protect API budgets. |
+| `AI_MAX_RETRIES` | `3` | Maximum bounded retry attempts per provider before triggering failover. |
+| `AI_HTTP_TIMEOUT_MS` | `12000` | Timeout in milliseconds per AI network request (12 seconds). |
+
+### Optional Persistent History Store (Redis)
+| Variable | Default Value | Description |
+| :--- | :--- | :--- |
+| `REDIS_URL` | *(Optional)* `rediss://...` | Connection URI for persistent question duplicate prevention. If absent, uses in-memory adapter. |
+| `HISTORY_TTL_SECONDS` | `172800` (48 hours) | Time-to-live for cross-room and cross-provider duplicate-prevention fingerprints. |
+| `HISTORY_MAX_ENTRIES` | `500` | Maximum recent fingerprints retained per room/category history. |
+
+> [!CAUTION]
+> **State Retention Limitation**:
+> Server restarts **always clear active games and room sessions** even if question history is stored persistently in Redis. Active multiplayer state is held in-memory for zero-latency authoritative game synchronization.
 
 ---
 
@@ -71,7 +102,7 @@ Configure the following environment variables in your platform dashboard:
 3. Connect your GitHub repository (`https://github.com/Sampath-2004/Mind-Clash`).
 4. Render will detect the included [`render.yaml`](./render.yaml).
 5. Select the **Starter** plan ($7/mo) for continuous persistent WebSockets, or **Free**.
-6. Click **Apply**. Render will automatically run `npm install && npm run build` and launch with `npm start`.
+6. Click **Apply**. Render will automatically run `npm install --include=dev && npm run build` and launch with `npm start`.
 
 #### Method 2: Manual Web Service Setup on Render
 1. Click **New +** → **Web Service**.
@@ -81,7 +112,7 @@ Configure the following environment variables in your platform dashboard:
    - **Region**: Select your preferred region (e.g., US Oregon, Frankfurt).
    - **Branch**: `master`
    - **Runtime**: `Node`
-   - **Build Command**: `npm install && npm run build`
+   - **Build Command**: `npm install --include=dev && npm run build`
    - **Start Command**: `npm start`
    - **Instance Type**: `Starter` ($7/mo) or `Free`
 4. Under **Advanced**:
@@ -144,3 +175,23 @@ Once your deployment is live, verify functionality using two independent browser
    - Confirm both clients see each other in the live lobby roster.
    - **Host**: Click **Start Match**.
    - Confirm both clients transition to the arena simultaneously and can submit answers.
+
+---
+
+## 7. Shared Duplicate Prevention & Content History
+
+Mind Clash includes a shared duplicate-prevention system for generated Trivia questions and Rare Answer prompts:
+- **Normalized Text Fingerprints & Stable IDs**: Questions receive deterministic SHA-256 stable IDs based on normalized keywords, stripping punctuation, diacritics, and stopwords.
+- **Paraphrase & Near-Duplicate Detection**: Evaluates token Jaccard similarity and character trigram similarity. Closely paraphrased questions (semantic similarity >= 0.65) are rejected and retried automatically.
+- **Shared Cross-Provider History**: A single history pool is used across all sources (Google Gemini, OpenAI fallback, and the curated offline bank).
+- **Rematch History Preservation**: Room history is preserved across consecutive games in the same room, preventing question repeats in rematches.
+- **Lease Reservations**: Concurrent match preparations in the same room acquire atomic leases to prevent collision.
+- **Storage Adapters**:
+  - **In-Memory Adapter (Default)**: Automatically used without additional infrastructure. Bounded by capacity limits (2000 global / 200 room entries) and TTL (default 24h).
+  - **Optional Redis Adapter**: Enabled when `REDIS_URL` is set in the environment. If Redis becomes unavailable, the system logs a warning and gracefully falls back to in-memory history without failing user requests.
+
+> [!IMPORTANT]
+> **Operational Limitations**:
+> 1. **In-memory history is lost on server restart**: When running without Redis, restarting the Node.js process clears recent question history.
+> 2. **Recent-history protection is bounded**: History entries expire according to `HISTORY_TTL_MS` (default 24 hours) and FIFO/LRU capacity caps.
+> 3. **Unlimited uniqueness cannot be guaranteed**: Across unbounded rounds or with finite offline categories, question pools can be exhausted. If exhausted, the system explicitly explains exhaustion rather than silently recycling content.

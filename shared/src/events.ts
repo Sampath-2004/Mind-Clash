@@ -44,6 +44,11 @@ export interface SubmitReactionPayload {
   clientTimeMs: number;
 }
 
+export interface SubmitRareAnswerPayload {
+  answer: string;
+  clientTimeMs: number;
+}
+
 export interface ReconnectResponseData {
   room: RoomState;
   playerId: string;
@@ -52,6 +57,9 @@ export interface ReconnectResponseData {
   remainingMs?: number;
   roundRecap?: RoundRecapData;
   podiumData?: GameOverPodiumData;
+  submittedPlayerIds?: string[];
+  mySubmittedAnswer?: string;
+  isJudging?: boolean;
 }
 
 export interface ServerResponseAck<T = undefined> {
@@ -109,10 +117,21 @@ export interface ClientToServerEvents {
     callback?: (response: ServerResponseAck) => void
   ) => void;
 
+  submit_rare_answer: (
+    payload: SubmitRareAnswerPayload,
+    callback?: (response: ServerResponseAck) => void
+  ) => void;
+
   ping_clock: (
     clientTime: number,
     callback: (data: { clientTime: number; serverTime: number }) => void
   ) => void;
+
+  retry_ai_generation: (callback?: (response: ServerResponseAck) => void) => void;
+
+  use_offline_questions: (callback?: (response: ServerResponseAck) => void) => void;
+
+  cancel_match: (callback?: (response: ServerResponseAck) => void) => void;
 
   play_again: (callback?: (response: ServerResponseAck) => void) => void;
 
@@ -128,6 +147,8 @@ export interface ServerToClientEvents {
   player_left: (data: { playerId: string; newHostId?: string }) => void;
   player_disconnected: (playerId: string) => void;
   player_reconnected: (player: Player) => void;
+  questions_preparing: (data: { count: number; provider: string }) => void;
+  questions_preparation_failed: (data: { error: string; canRetry: boolean; canUseOffline: boolean }) => void;
   game_starting: (data: { countdownMs: number; serverTime: number }) => void;
   round_intro: (data: {
     round: number;
@@ -146,6 +167,8 @@ export interface ServerToClientEvents {
     serverTime: number;
   }) => void;
   submission_acknowledged: (data: { playerId: string }) => void;
+  rare_answer_judging: (data: { prompt: string; roundNumber: number }) => void;
+  round_voided: (data: { reason: string; replacementOffered: boolean }) => void;
   round_recap: (recap: RoundRecapData) => void;
   game_over: (podium: GameOverPodiumData) => void;
   kicked: (data: { reason: string }) => void;

@@ -3,7 +3,7 @@ services:
     name: mind-clash
     runtime: node
     plan: free # Free tier: $0/mo, spins down after 15 min of inactivity
-    buildCommand: npm install && npm run build
+    buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /api/health
     autoDeploy: true
@@ -14,6 +14,30 @@ services:
         value: 20.18.0
       - key: MAX_ROOM_IDLE_MINUTES
         value: "15"
+      # AI Generation Models & Credentials (Use Placeholders; Never Commit Real API Keys)
+      - key: GEMINI_MODEL
+        value: "gemini-2.5-flash"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: "gpt-4o-mini"
+      - key: OPENAI_API_KEY
+        sync: false
+      # AI Usage-Budget & Concurrency Controls
+      - key: AI_MAX_CONCURRENT_BATCHES
+        value: "5"
+      - key: AI_MAX_RETRIES
+        value: "3"
+      - key: AI_HTTP_TIMEOUT_MS
+        value: "12000"
+      # Optional Persistent Question Duplicate-Prevention Store (Redis)
+      # NOTE: Active multiplayer matches are held in-memory and cleared on server restart.
+      - key: REDIS_URL
+        sync: false
+      - key: HISTORY_TTL_SECONDS
+        value: "172800"
+      - key: HISTORY_MAX_ENTRIES
+        value: "500"
       # CLIENT_ORIGIN is automatically detected from Render's RENDER_EXTERNAL_URL
       # To specify custom domains, add comma-separated origins here:
       # - key: CLIENT_ORIGIN

@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Flame, ArrowRight, HelpCircle, Calculator, Grid, Zap, CheckCircle2, ShieldAlert, Info } from 'lucide-react';
+import { Flame, ArrowRight, HelpCircle, Calculator, Grid, Zap, CheckCircle2, ShieldAlert, Info, Sparkles, Gauge } from 'lucide-react';
 import { useGame } from '../context/GameStateContext';
 import { CountdownTimer } from '../components/common/CountdownTimer';
 import { TriviaView } from '../components/arena/TriviaView';
 import { MathView } from '../components/arena/MathView';
 import { MemoryView } from '../components/arena/MemoryView';
 import { ReactionView } from '../components/arena/ReactionView';
-import { GameMode, TriviaQuestionClient, MathQuestionClient, MemoryChallengeClient, ReactionChallengeClient } from '@mind-clash/shared';
+import { RareAnswerView } from '../components/arena/RareAnswerView';
+import { GameMode, TriviaQuestionClient, MathQuestionClient, MemoryChallengeClient, ReactionChallengeClient, RareAnswerChallengeClient } from '@mind-clash/shared';
 import { sounds } from '../audio/soundEffects';
 import { useToast } from '../context/ToastContext';
 
@@ -21,7 +22,9 @@ export const GameArenaPage: React.FC = () => {
     submitMath,
     submitMemory,
     submitReaction,
+    submitRareAnswer,
     clockOffsetMs,
+    isJudging,
   } = useGame();
   const { showToast } = useToast();
 
@@ -138,6 +141,15 @@ export const GameArenaPage: React.FC = () => {
       'Online multiplayer reflex times depend on network transit latency (ping) between your device and the server. Reaction rankings are calibrated for competitive fun, not laboratory millisecond fairness.',
   };
 
+  const rareAnswerSample: RareAnswerChallengeClient = {
+    id: 'ra-sample',
+    category: 'World Geography',
+    prompt: 'Name a country in South America',
+    sampleAcceptableHint: 'e.g. Suriname, Paraguay, Uruguay, Ecuador...',
+    difficulty: 'medium',
+    durationMs: 18000,
+  };
+
   // Determine current active mode
   const effectiveMode: GameMode = activeChallenge?.mode || (currentRoom?.activeMode as GameMode) || activeTabMode;
 
@@ -202,6 +214,19 @@ export const GameArenaPage: React.FC = () => {
     }
   };
 
+  const handleRareAnswerSubmit = async (answer: string) => {
+    if (currentRoom) {
+      const res = await submitRareAnswer(answer);
+      if (!res.success) {
+        showToast('Submission Rejected', res.error || 'Could not record answer', 'error');
+      } else {
+        showToast('Answer Recorded!', 'Edits allowed until server deadline.', 'info');
+      }
+    } else {
+      showToast('Answer Submitted!', 'Waiting for round time to expire...', 'info');
+    }
+  };
+
   const handleFinishRound = () => {
     sounds.playClick();
     showToast('Round Concluded!', 'Compiling real-time scores...', 'info');
@@ -242,17 +267,24 @@ export const GameArenaPage: React.FC = () => {
       <div className="glass-panel p-4 sm:p-5 rounded-3xl flex items-center justify-between gap-4">
         {/* Left: Round & Mode Pill */}
         <div className="space-y-0.5">
-          <span className="text-[10px] uppercase tracking-widest font-bold text-slate-400">
-            {currentRoom
-              ? `ROUND ${currentRoom.currentRound} OF ${currentRoom.totalRounds}`
-              : 'ROUND 1 OF 5 (PREVIEW)'}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] uppercase tracking-widest font-bold text-slate-400">
+              {currentRoom
+                ? `ROUND ${currentRoom.currentRound} OF ${currentRoom.totalRounds}`
+                : 'ROUND 1 OF 5 (PREVIEW)'}
+            </span>
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-white/10 border border-white/10 text-cyan-300">
+              <Gauge className="w-2.5 h-2.5 text-cyan-400" />
+              {currentRoom?.settings?.difficulty || 'medium'}
+            </span>
+          </div>
           <div className="flex items-center gap-2">
             <span className="text-base sm:text-lg font-black text-white capitalize">
               {effectiveMode === 'trivia' && 'Trivia Blitz'}
               {effectiveMode === 'math' && 'Speed Math'}
               {effectiveMode === 'memory' && 'Memory Matrix'}
               {effectiveMode === 'reaction' && 'Reaction Clash'}
+              {effectiveMode === 'rare_answer' && 'Rare Answer'}
             </span>
           </div>
         </div>
@@ -295,6 +327,7 @@ export const GameArenaPage: React.FC = () => {
             { mode: 'math', label: 'Math', icon: <Calculator className="w-3.5 h-3.5" /> },
             { mode: 'memory', label: 'Memory', icon: <Grid className="w-3.5 h-3.5" /> },
             { mode: 'reaction', label: 'Reaction', icon: <Zap className="w-3.5 h-3.5" /> },
+            { mode: 'rare_answer', label: 'Rare Answer', icon: <Sparkles className="w-3.5 h-3.5" /> },
           ].map((item) => (
             <button
               key={item.mode}
@@ -337,6 +370,11 @@ export const GameArenaPage: React.FC = () => {
                 <strong className="text-white">Reaction Rules:</strong> Shared waiting screen. Tap or press SPACE immediately when STRIKE activates.
               </>
             )}
+            {effectiveMode === 'rare_answer' && (
+              <>
+                <strong className="text-white">Rare Answer Rules:</strong> Type a valid private answer. Edits allowed until deadline. Scores are based on match uniqueness.
+              </>
+            )}
           </span>
         </div>
         <span className="font-mono text-cyan-300 text-[11px] font-bold shrink-0 bg-cyan-500/10 px-2.5 py-1 rounded-lg border border-cyan-500/20">
@@ -344,6 +382,7 @@ export const GameArenaPage: React.FC = () => {
           {effectiveMode === 'math' && '100 Base + Up to 50 Speed Bonus'}
           {effectiveMode === 'memory' && '100 Base + Speed Bonus • 15 pts / partial'}
           {effectiveMode === 'reaction' && '100 Base + Reflex Bonus • Early Tap -200 pts'}
+          {effectiveMode === 'rare_answer' && '100 ÷ Matching Players • No Speed Bonus'}
         </span>
       </div>
 
@@ -402,8 +441,20 @@ export const GameArenaPage: React.FC = () => {
           />
         )}
 
-        {/* Submission Confirmation Indicator */}
-        {hasSubmitted && (
+        {effectiveMode === 'rare_answer' && (
+          <RareAnswerView
+            challenge={
+              activeChallenge?.mode === 'rare_answer'
+                ? activeChallenge.challenge
+                : rareAnswerSample
+            }
+            disabled={remainingMs <= 0 || isJudging}
+            onAnswer={handleRareAnswerSubmit}
+          />
+        )}
+
+        {/* Submission Confirmation Indicator (for single-submission modes) */}
+        {hasSubmitted && effectiveMode !== 'rare_answer' && (
           <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-bold animate-pulse">
             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
             <span>Answer Locked In • Waiting for server round conclusion</span>

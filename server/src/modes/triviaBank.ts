@@ -1,13 +1,24 @@
 import crypto from 'crypto';
-import { TriviaQuestionServer, DEFAULT_QUESTION_DURATION_MS } from '@mind-clash/shared';
+import { TriviaQuestionServer, Difficulty, DEFAULT_QUESTION_DURATION_MS } from '@mind-clash/shared';
+import { QuestionPoolExhaustedError } from '../services/duplicatePrevention.js';
 
 export interface RawTriviaItem {
   id: string;
-  category: 'Science' | 'Technology' | 'General Knowledge' | 'Geography' | 'Entertainment';
+  difficulty?: Difficulty;
+  category: 'Science' | 'Technology' | 'General Knowledge' | 'Geography' | 'Entertainment' | string;
   question: string;
   correctAnswer: string;
   incorrectAnswers: [string, string, string];
   explanation: string;
+}
+
+export function getQuestionDifficulty(item: RawTriviaItem): Difficulty {
+  if (item.difficulty) return item.difficulty;
+  const num = parseInt(item.id.replace(/\D/g, ''), 10) || 1;
+  // Questions 1-8 are easy (familiar facts), 9-18 are medium (broader knowledge), 19-25 are hard (specialized depth)
+  if (num <= 8) return 'easy';
+  if (num <= 18) return 'medium';
+  return 'hard';
 }
 
 export const TRIVIA_BANK: RawTriviaItem[] = [
@@ -1023,17 +1034,29 @@ export const TRIVIA_BANK: RawTriviaItem[] = [
 ];
 
 /**
- * Retrieves a non-repeating trivia question and dynamically randomizes the answer order.
+ * Retrieves a non-repeating trivia question for the requested difficulty
+ * and dynamically randomizes the answer order.
+ * Guaranteed never to substitute an easier level.
  */
-export function getRandomTriviaQuestion(usedQuestionIds: Set<string>): TriviaQuestionServer {
-  let pool = TRIVIA_BANK.filter((q) => !usedQuestionIds.has(q.id));
-  if (pool.length === 0) {
-    // If all questions have been exhausted in this room, recycle the pool
-    pool = TRIVIA_BANK;
+export function getRandomTriviaQuestion(
+  usedQuestionIds: Set<string>,
+  difficulty: Difficulty = 'medium',
+  allowRecycle = false
+): TriviaQuestionServer {
+  const pool = TRIVIA_BANK.filter((q) => getQuestionDifficulty(q) === difficulty);
+  let available = pool.filter((q) => !usedQuestionIds.has(q.id));
+  if (available.length === 0) {
+    if (!allowRecycle) {
+      throw new QuestionPoolExhaustedError(
+        `Offline question pool exhausted: All available offline trivia questions for difficulty '${difficulty}' have been recently played in this room. Please select a different difficulty or reset room history.`
+      );
+    }
+    // If all questions for this difficulty have been exhausted and recycle is allowed
+    available = pool.length > 0 ? pool : TRIVIA_BANK;
   }
 
-  const selectedIndex = crypto.randomInt(0, pool.length);
-  const selected = pool[selectedIndex];
+  const selectedIndex = crypto.randomInt(0, available.length);
+  const selected = available[selectedIndex];
 
   // Randomize answer order (shuffle correct answer with distractors)
   const options = [selected.correctAnswer, ...selected.incorrectAnswers];
@@ -1052,5 +1075,6 @@ export function getRandomTriviaQuestion(usedQuestionIds: Set<string>): TriviaQue
     correctIndex,
     explanation: selected.explanation,
     durationMs: DEFAULT_QUESTION_DURATION_MS,
+    difficulty: getQuestionDifficulty(selected),
   };
 }

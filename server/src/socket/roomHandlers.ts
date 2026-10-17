@@ -13,6 +13,7 @@ import {
   submitMathSchema,
   submitMemorySchema,
   submitReactionSchema,
+  submitRareAnswerSchema,
   pingClockSchema,
 } from '@mind-clash/shared';
 import { roomManager } from '../managers/RoomManager.js';
@@ -157,7 +158,7 @@ export function registerRoomHandlers(
       if (oldSocketId) {
         engine.updatePlayerSocketId(room.roomCode, oldSocketId, socket.id);
       }
-      const snapshot = engine.getReconnectionSnapshot(room);
+      const snapshot = engine.getReconnectionSnapshot(room, player.id);
 
       socket.join(room.roomCode);
       socket.data.roomCode = room.roomCode;
@@ -176,6 +177,9 @@ export function registerRoomHandlers(
           remainingMs: snapshot.remainingMs,
           roundRecap: snapshot.roundRecap,
           podiumData: snapshot.podiumData,
+          submittedPlayerIds: snapshot.submittedPlayerIds,
+          mySubmittedAnswer: snapshot.mySubmittedAnswer,
+          isJudging: snapshot.isJudging,
         },
       });
 
@@ -241,7 +245,7 @@ export function registerRoomHandlers(
   });
 
   // 7. Start Game (Host Only)
-  socket.on('start_game', (callback) => {
+  socket.on('start_game', async (callback) => {
     if (!checkRateLimit(socket, 'room_action')) {
       return callback?.({ success: false, error: 'Too many requests. Please slow down.' });
     }
@@ -256,10 +260,67 @@ export function registerRoomHandlers(
         throw new Error(`At least ${MIN_PLAYERS_PER_ROOM} players required to start the match`);
       }
 
-      engine.startGame(room);
+      await engine.startGame(room);
       callback?.({ success: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not start game';
+      callback?.({ success: false, error: message });
+    }
+  });
+
+  // 7b. Retry AI Question Generation (Host Only)
+  socket.on('retry_ai_generation', async (callback) => {
+    if (!checkRateLimit(socket, 'room_action')) {
+      return callback?.({ success: false, error: 'Too many requests. Please slow down.' });
+    }
+
+    try {
+      const room = roomManager.getRoomBySocketId(socket.id);
+      if (!room) throw new Error('Room not found');
+      if (room.hostId !== socket.id) throw new Error('Only the host can retry question generation');
+
+      await engine.retryAiGeneration(room);
+      callback?.({ success: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not retry question generation';
+      callback?.({ success: false, error: message });
+    }
+  });
+
+  // 7c. Use Offline Questions Choice (Host Only)
+  socket.on('use_offline_questions', async (callback) => {
+    if (!checkRateLimit(socket, 'room_action')) {
+      return callback?.({ success: false, error: 'Too many requests. Please slow down.' });
+    }
+
+    try {
+      const room = roomManager.getRoomBySocketId(socket.id);
+      if (!room) throw new Error('Room not found');
+      if (room.hostId !== socket.id) throw new Error('Only the host can choose offline questions');
+
+      await engine.useOfflineQuestions(room);
+      callback?.({ success: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not use offline questions';
+      callback?.({ success: false, error: message });
+    }
+  });
+
+  // 7d. Cancel Match Preparation (Host Only)
+  socket.on('cancel_match', (callback) => {
+    if (!checkRateLimit(socket, 'room_action')) {
+      return callback?.({ success: false, error: 'Too many requests. Please slow down.' });
+    }
+
+    try {
+      const room = roomManager.getRoomBySocketId(socket.id);
+      if (!room) throw new Error('Room not found');
+      if (room.hostId !== socket.id) throw new Error('Only the host can cancel match preparation');
+
+      engine.cancelMatch(room);
+      callback?.({ success: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not cancel match';
       callback?.({ success: false, error: message });
     }
   });
@@ -365,6 +426,34 @@ export function registerRoomHandlers(
       if (!room) throw new Error('Player not in an active room');
 
       const res = engine.submitAnswer(room, socket.id, {
+        clientTimeMs: validation.data.clientTimeMs,
+      });
+
+      if (!res.success) throw new Error(res.error);
+      callback?.({ success: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Invalid submission';
+      callback?.({ success: false, error: message });
+    }
+  });
+
+  // 12. Submit Rare Answer (Gameplay action rate limit)
+  socket.on('submit_rare_answer', (payload, callback) => {
+    if (!checkRateLimit(socket, 'gameplay_action')) {
+      return callback?.({ success: false, error: 'Submission rate limit exceeded.' });
+    }
+
+    const validation = submitRareAnswerSchema.safeParse(payload);
+    if (!validation.success) {
+      return callback?.({ success: false, error: 'Invalid submission payload' });
+    }
+
+    try {
+      const room = roomManager.getRoomBySocketId(socket.id);
+      if (!room) throw new Error('Player not in an active room');
+
+      const res = engine.submitAnswer(room, socket.id, {
+        textAnswer: validation.data.answer,
         clientTimeMs: validation.data.clientTimeMs,
       });
 

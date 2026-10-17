@@ -235,7 +235,7 @@ function gracefulShutdown(signal: string) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-if (!config.isTest) {
+if (!config.isTest || process.env.PLAYWRIGHT_TEST === 'true') {
   httpServer.listen(config.port, '0.0.0.0', () => {
     logger.info(`Mind Clash Server listening on 0.0.0.0:${config.port}`, {
       origins: config.allowedOrigins,

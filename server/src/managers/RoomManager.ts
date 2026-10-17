@@ -88,6 +88,8 @@ export class RoomManager {
         mathTotal: 0,
         memoryPerfectCount: 0,
         fastestReactionMs: null,
+        rareAnswerCorrect: 0,
+        rareAnswerTotal: 0,
         highestStreak: 0,
       },
     };
@@ -95,6 +97,7 @@ export class RoomManager {
     const initialSettings: RoomSettings = {
       roundCount: DEFAULT_ROUND_COUNT,
       selectedModes: ['trivia', 'math', 'memory', 'reaction'],
+      difficulty: 'medium',
     };
 
     const room: RoomState = {
@@ -180,6 +183,8 @@ export class RoomManager {
         mathTotal: 0,
         memoryPerfectCount: 0,
         fastestReactionMs: null,
+        rareAnswerCorrect: 0,
+        rareAnswerTotal: 0,
         highestStreak: 0,
       },
     };
@@ -449,6 +454,10 @@ export class RoomManager {
       throw new Error('Only the host can modify room settings');
     }
 
+    if (room.status !== 'LOBBY') {
+      throw new Error('Room settings are locked during an active match');
+    }
+
     if (newSettings.roundCount !== undefined) {
       const clamped = Math.max(
         MIN_ROUND_COUNT,
@@ -460,6 +469,18 @@ export class RoomManager {
 
     if (newSettings.selectedModes && newSettings.selectedModes.length > 0) {
       room.settings.selectedModes = newSettings.selectedModes;
+      if (
+        newSettings.selectedModes.length === 1 &&
+        newSettings.selectedModes[0] === 'rare_answer' &&
+        newSettings.roundCount === undefined
+      ) {
+        room.settings.roundCount = 7;
+        room.totalRounds = 7;
+      }
+    }
+
+    if (newSettings.difficulty) {
+      room.settings.difficulty = newSettings.difficulty;
     }
 
     room.lastActivityAt = Date.now();

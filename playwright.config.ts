@@ -26,7 +26,8 @@ export default defineConfig({
     env: {
       PORT: '3001',
       CLIENT_ORIGIN: 'http://localhost:3001,http://localhost:5173',
-      NODE_ENV: 'development',
+      NODE_ENV: 'test',
+      PLAYWRIGHT_TEST: 'true',
     },
   },
 });

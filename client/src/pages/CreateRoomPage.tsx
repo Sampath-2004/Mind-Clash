@@ -1,25 +1,27 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { ArrowLeft, Sparkles, Check, Layers, AlertCircle } from 'lucide-react';
+import { ArrowLeft, Sparkles, Check, Layers, AlertCircle, Gauge } from 'lucide-react';
 import { AVATAR_OPTIONS, useGame } from '../context/GameStateContext';
 import { AvatarBadge } from '../components/common/AvatarBadge';
-import { GameMode, DEFAULT_ROUND_COUNT } from '@mind-clash/shared';
+import { GameMode, Difficulty, DEFAULT_ROUND_COUNT } from '@mind-clash/shared';
 import { sounds } from '../audio/soundEffects';
 import { useToast } from '../context/ToastContext';
 
 export const CreateRoomPage: React.FC = () => {
   const navigate = useNavigate();
   const { showToast } = useToast();
-  const { createRoom } = useGame();
+  const { createRoom, updateSettings } = useGame();
 
   const [nickname, setNickname] = useState('');
   const [selectedAvatar, setSelectedAvatar] = useState(AVATAR_OPTIONS[0].id);
   const [roundCount, setRoundCount] = useState<number>(DEFAULT_ROUND_COUNT);
+  const [difficulty, setDifficulty] = useState<Difficulty>('medium');
   const [selectedModes, setSelectedModes] = useState<GameMode[]>([
     'trivia',
     'math',
     'memory',
     'reaction',
+    'rare_answer',
   ]);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -53,12 +55,13 @@ export const CreateRoomPage: React.FC = () => {
 
     setIsSubmitting(true);
     const result = await createRoom(trimmed, selectedAvatar);
-    setIsSubmitting(false);
-
     if (result.success) {
+      await updateSettings({ roundCount, selectedModes, difficulty });
+      setIsSubmitting(false);
       showToast('Arena Created!', 'Room is ready for competitors', 'success');
       navigate('/lobby');
     } else {
+      setIsSubmitting(false);
       setError(result.error || 'Failed to create room');
       showToast('Creation Failed', result.error || 'Could not create room', 'error');
     }
@@ -172,19 +175,60 @@ export const CreateRoomPage: React.FC = () => {
               </div>
             </div>
 
+            {/* Difficulty Selector */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs uppercase tracking-wider font-bold text-slate-300 flex items-center gap-1.5">
+                  <Gauge className="w-3.5 h-3.5 text-cyan-400" /> Match Difficulty
+                </span>
+                <span className="text-xs font-mono font-bold text-cyan-300 capitalize">
+                  {difficulty}
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { id: 'easy' as Difficulty, label: 'Easy', desc: 'Direct' },
+                  { id: 'medium' as Difficulty, label: 'Medium', desc: 'Balanced' },
+                  { id: 'hard' as Difficulty, label: 'Hard', desc: 'Intense' },
+                ].map((tier) => (
+                  <button
+                    key={tier.id}
+                    type="button"
+                    onClick={() => {
+                      sounds.playClick();
+                      setDifficulty(tier.id);
+                    }}
+                    className={`py-2 px-3 rounded-xl border text-xs font-bold transition flex flex-col items-center justify-center gap-0.5 ${
+                      difficulty === tier.id
+                        ? tier.id === 'easy'
+                          ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300 ring-1 ring-emerald-400/40'
+                          : tier.id === 'medium'
+                          ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 ring-1 ring-cyan-400/40'
+                          : 'bg-rose-500/20 border-rose-400 text-rose-300 ring-1 ring-rose-400/40'
+                        : 'bg-white/5 border-white/10 text-slate-400 hover:text-white hover:bg-white/10'
+                    }`}
+                  >
+                    <span>{tier.label}</span>
+                    <span className="text-[9px] opacity-60 font-normal">{tier.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Game Modes Toggles */}
             <div className="space-y-2">
               <span className="block text-xs uppercase tracking-wider font-bold text-slate-300">
                 Game Modes Included
               </span>
-              <div className="grid grid-cols-2 gap-2">
-                {(['trivia', 'math', 'memory', 'reaction'] as GameMode[]).map((mode) => {
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {(['trivia', 'math', 'memory', 'reaction', 'rare_answer'] as GameMode[]).map((mode) => {
                   const isEnabled = selectedModes.includes(mode);
                   const labels: Record<GameMode, string> = {
                     trivia: 'Trivia Blitz',
                     math: 'Speed Math',
                     memory: 'Memory Matrix',
                     reaction: 'Reaction Clash',
+                    rare_answer: 'Rare Answer',
                   };
 
                   return (
