@@ -36,7 +36,22 @@ const isOriginAllowed = (origin: string | undefined): boolean => {
   }
 
   // In non-production, check allowedOrigins or allow wildcard
-  return config.allowedOrigins.includes(origin) || config.allowedOrigins.includes('*');
+  if (config.allowedOrigins.includes(origin) || config.allowedOrigins.includes('*')) {
+    return true;
+  }
+
+  // Permit any private LAN IP origin in development (192.168.x.x, 10.x.x.x, 172.16-31.x.x, localhost, 127.0.0.1)
+  if (
+    /^https?:\/\/192\.168\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(origin) ||
+    /^https?:\/\/10\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(origin) ||
+    /^https?:\/\/172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(origin) ||
+    /^https?:\/\/localhost(:\d+)?$/.test(origin) ||
+    /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)
+  ) {
+    return true;
+  }
+
+  return false;
 };
 
 // 1. Security Headers via Helmet
@@ -189,8 +204,8 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 if (!config.isTest) {
-  httpServer.listen(config.port, () => {
-    logger.info(`Mind Clash Server listening on port ${config.port}`, {
+  httpServer.listen(config.port, '0.0.0.0', () => {
+    logger.info(`Mind Clash Server listening on 0.0.0.0:${config.port}`, {
       origins: config.allowedOrigins,
       environment: config.nodeEnv,
     });

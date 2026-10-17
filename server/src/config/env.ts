@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import dotenv from 'dotenv';
+import os from 'os';
 
 dotenv.config();
 
@@ -45,6 +46,23 @@ const env = parsedEnv.success
       MAX_ROOM_IDLE_MINUTES: 15,
     };
 
+export function getLocalIps(): string[] {
+  try {
+    const interfaces = os.networkInterfaces();
+    const ips: string[] = [];
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name] || []) {
+        if (iface.family === 'IPv4' && !iface.internal) {
+          ips.push(iface.address);
+        }
+      }
+    }
+    return ips;
+  } catch {
+    return [];
+  }
+}
+
 export function getAllowedOrigins(
   rawOrigin: string = env.CLIENT_ORIGIN,
   isProd: boolean = env.NODE_ENV === 'production',
@@ -82,6 +100,15 @@ export function getAllowedOrigins(
     const ipServer = `http://127.0.0.1:${port}`;
     if (!list.includes(localServer)) list.push(localServer);
     if (!list.includes(ipServer)) list.push(ipServer);
+
+    // Auto-detect Wi-Fi and Ethernet LAN IPv4 addresses for cross-device local play
+    const localIps = getLocalIps();
+    for (const ip of localIps) {
+      const viteLan = `http://${ip}:5173`;
+      const backendLan = `http://${ip}:${port}`;
+      if (!list.includes(viteLan)) list.push(viteLan);
+      if (!list.includes(backendLan)) list.push(backendLan);
+    }
   }
 
   if (isProd) {
