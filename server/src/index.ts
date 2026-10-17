@@ -26,27 +26,36 @@ const isOriginAllowed = (origin: string | undefined): boolean => {
   // Allow server-to-server, curl, and automated tests where origin header is absent
   if (!origin) return true;
 
-  // Always permit same-origin requests matching server port
-  if (origin === `http://localhost:${config.port}` || origin === `http://127.0.0.1:${config.port}`) {
-    return true;
-  }
+  const normalized = origin.trim().replace(/\/+$/, '');
 
   if (config.isProduction) {
-    return config.allowedOrigins.includes(origin);
+    if (config.allowedOrigins.includes(normalized)) {
+      return true;
+    }
+    // Automatically accept origin matching Render web service (*.onrender.com)
+    if (process.env.RENDER && /^https:\/\/[a-zA-Z0-9-]+\.onrender\.com$/.test(normalized)) {
+      return true;
+    }
+    return false;
   }
 
   // In non-production, check allowedOrigins or allow wildcard
-  if (config.allowedOrigins.includes(origin) || config.allowedOrigins.includes('*')) {
+  if (config.allowedOrigins.includes(normalized) || config.allowedOrigins.includes('*')) {
+    return true;
+  }
+
+  // Permit localhost matching server port in development
+  if (normalized === `http://localhost:${config.port}` || normalized === `http://127.0.0.1:${config.port}`) {
     return true;
   }
 
   // Permit any private LAN IP origin in development (192.168.x.x, 10.x.x.x, 172.16-31.x.x, localhost, 127.0.0.1)
   if (
-    /^https?:\/\/192\.168\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(origin) ||
-    /^https?:\/\/10\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(origin) ||
-    /^https?:\/\/172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(origin) ||
-    /^https?:\/\/localhost(:\d+)?$/.test(origin) ||
-    /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)
+    /^https?:\/\/192\.168\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(normalized) ||
+    /^https?:\/\/10\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(normalized) ||
+    /^https?:\/\/172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(normalized) ||
+    /^https?:\/\/localhost(:\d+)?$/.test(normalized) ||
+    /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(normalized)
   ) {
     return true;
   }
@@ -110,12 +119,33 @@ app.get('/api/health', healthHandler);
 app.get('/health', healthHandler);
 
 // 5. Serve static client bundle if it exists (for unified production deployment)
-const clientDistPath = path.resolve(__dirname, '../../client/dist');
-if (fs.existsSync(clientDistPath)) {
+const findClientDistPath = (): string | null => {
+  const candidates = [
+    process.env.CLIENT_DIST_PATH,
+    path.resolve(__dirname, '../../client/dist'),
+    path.resolve(__dirname, '../client/dist'),
+    path.resolve(process.cwd(), 'client/dist'),
+    path.resolve(process.cwd(), '../client/dist'),
+  ].filter(Boolean) as string[];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate) && fs.existsSync(path.join(candidate, 'index.html'))) {
+      return candidate;
+    }
+  }
+  return null;
+};
+
+const clientDistPath = findClientDistPath();
+if (clientDistPath) {
+  logger.info(`Serving static client bundle from: ${clientDistPath}`);
   app.use(express.static(clientDistPath));
   app.get('*', (req: Request, res: Response, next: NextFunction) => {
     if (req.path.startsWith('/socket.io') || req.path.startsWith('/api') || req.path.startsWith('/health')) {
       return next();
+    }
+    if (req.path.startsWith('/assets/')) {
+      return res.status(404).send('Asset not found');
     }
     const indexPath = path.join(clientDistPath, 'index.html');
     if (fs.existsSync(indexPath)) {
@@ -123,6 +153,8 @@ if (fs.existsSync(clientDistPath)) {
     }
     next();
   });
+} else {
+  logger.warn('Frontend client dist bundle not found; static serving disabled.');
 }
 
 // 6. API 404 Handler

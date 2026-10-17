@@ -70,28 +70,32 @@ export function getAllowedOrigins(
 ): string[] {
   const list = rawOrigin
     .split(',')
-    .map((o) => o.trim())
+    .map((o) => o.trim().replace(/\/+$/, ''))
     .filter(Boolean);
 
   // Cloud platform auto-detection (Render, Railway, custom domains)
   if (process.env.RENDER_EXTERNAL_URL) {
-    const renderUrl = process.env.RENDER_EXTERNAL_URL.trim().replace(/\/$/, '');
+    const renderUrl = process.env.RENDER_EXTERNAL_URL.trim().replace(/\/+$/, '');
     if (!list.includes(renderUrl)) list.push(renderUrl);
   }
   if (process.env.RENDER_EXTERNAL_HOSTNAME) {
-    const renderHostUrl = `https://${process.env.RENDER_EXTERNAL_HOSTNAME.trim()}`.replace(/\/$/, '');
+    const renderHostUrl = `https://${process.env.RENDER_EXTERNAL_HOSTNAME.trim()}`.replace(/\/+$/, '');
     if (!list.includes(renderHostUrl)) list.push(renderHostUrl);
   }
+  if (process.env.RENDER_SERVICE_NAME) {
+    const renderServiceUrl = `https://${process.env.RENDER_SERVICE_NAME.trim()}.onrender.com`;
+    if (!list.includes(renderServiceUrl)) list.push(renderServiceUrl);
+  }
   if (process.env.RAILWAY_PUBLIC_DOMAIN) {
-    const railwayUrl = `https://${process.env.RAILWAY_PUBLIC_DOMAIN.trim()}`.replace(/\/$/, '');
+    const railwayUrl = `https://${process.env.RAILWAY_PUBLIC_DOMAIN.trim()}`.replace(/\/+$/, '');
     if (!list.includes(railwayUrl)) list.push(railwayUrl);
   }
   if (process.env.RAILWAY_STATIC_URL) {
-    const railwayStaticUrl = `https://${process.env.RAILWAY_STATIC_URL.trim()}`.replace(/\/$/, '');
+    const railwayStaticUrl = `https://${process.env.RAILWAY_STATIC_URL.trim()}`.replace(/\/+$/, '');
     if (!list.includes(railwayStaticUrl)) list.push(railwayStaticUrl);
   }
   if (process.env.PUBLIC_URL) {
-    const pubUrl = process.env.PUBLIC_URL.trim().replace(/\/$/, '');
+    const pubUrl = process.env.PUBLIC_URL.trim().replace(/\/+$/, '');
     if (!list.includes(pubUrl)) list.push(pubUrl);
   }
 
@@ -115,15 +119,12 @@ export function getAllowedOrigins(
     // In production, strictly forbid wildcard '*'
     let sanitized = list.filter((origin) => origin !== '*');
 
-    // When cloud or custom production origins exist, strip localhost origins
+    // Strip localhost origins in cloud production (Render) or whenever production origins exist
     const hasProductionOrigin = sanitized.some((o) => !o.includes('localhost') && !o.includes('127.0.0.1'));
-    if (hasProductionOrigin) {
+    if (hasProductionOrigin || process.env.RENDER) {
       sanitized = sanitized.filter((o) => !o.includes('localhost') && !o.includes('127.0.0.1'));
     }
 
-    if (sanitized.length === 0) {
-      return [`http://localhost:${port}`];
-    }
     return sanitized;
   }
 

@@ -10,6 +10,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: 20.18.0
       - key: MAX_ROOM_IDLE_MINUTES
         value: "15"
       # CLIENT_ORIGIN is automatically detected from Render's RENDER_EXTERNAL_URL

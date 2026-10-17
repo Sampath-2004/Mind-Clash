@@ -55,8 +55,9 @@ Configure the following environment variables in your platform dashboard:
 | :--- | :--- | :--- |
 | `NODE_ENV` | `production` | Enables production security mode, disables verbose logging, enforces strict CORS. |
 | `PORT` | *(Provided by host)* | Render and Railway automatically inject `PORT` (e.g. 10000 on Render). Defaults to `3001` if unset. |
-| `CLIENT_ORIGIN` | `https://<your-deployment-url>` | Allowed origin(s) for CORS. (The server automatically permits Render's `RENDER_EXTERNAL_URL` and Railway's `RAILWAY_PUBLIC_DOMAIN`). |
+| `CLIENT_ORIGIN` | `https://<your-deployment-url>` | Allowed origin(s) for CORS. (The server automatically permits Render's `RENDER_EXTERNAL_URL`, `RENDER_EXTERNAL_HOSTNAME`, `*.onrender.com`, and Railway's `RAILWAY_PUBLIC_DOMAIN`). |
 | `MAX_ROOM_IDLE_MINUTES` | `15` | Minutes of inactivity before abandoned rooms and disconnected player sessions are purged from memory. |
+| `VITE_PUBLIC_URL` | `https://<your-deployment-url>` | *(Optional)* Explicit public website URL for room invite links (defaults to current browser origin `window.location.origin`). |
 
 ---
 

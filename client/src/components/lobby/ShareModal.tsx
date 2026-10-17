@@ -14,7 +14,18 @@ export const ShareModal: React.FC<ShareModalProps> = ({ isOpen, onClose, roomCod
   const [copied, setCopied] = useState(false);
   const { showToast } = useToast();
 
-  const shareUrl = `${window.location.origin}/join?code=${roomCode}`;
+  const getPublicBaseUrl = (): string => {
+    const envUrl = (import.meta.env.VITE_PUBLIC_URL as string | undefined)?.trim();
+    if (envUrl) {
+      return envUrl.replace(/\/+$/, '');
+    }
+    if (typeof window !== 'undefined' && window.location?.origin) {
+      return window.location.origin;
+    }
+    return '';
+  };
+
+  const shareUrl = `${getPublicBaseUrl()}/join?code=${roomCode}`;
 
   const handleCopyLink = async () => {
     sounds.playClick();
