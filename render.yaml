@@ -2,7 +2,7 @@ services:
   - type: web
     name: mind-clash
     runtime: node
-    plan: starter # Starter plan recommended for persistent WebSocket connections without spin-down
+    plan: free # Free tier: $0/mo, spins down after 15 min of inactivity
     buildCommand: npm install && npm run build
     startCommand: npm start
     healthCheckPath: /api/health

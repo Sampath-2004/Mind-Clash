@@ -18,6 +18,27 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const httpServer = createServer(app);
 
+// Enable trust proxy for accurate IP and HTTPS protocol detection behind reverse proxies (Render, Railway, Cloudflare)
+app.set('trust proxy', 1);
+
+// Shared origin validation for Express and Socket.IO
+const isOriginAllowed = (origin: string | undefined): boolean => {
+  // Allow server-to-server, curl, and automated tests where origin header is absent
+  if (!origin) return true;
+
+  // Always permit same-origin requests matching server port
+  if (origin === `http://localhost:${config.port}` || origin === `http://127.0.0.1:${config.port}`) {
+    return true;
+  }
+
+  if (config.isProduction) {
+    return config.allowedOrigins.includes(origin);
+  }
+
+  // In non-production, check allowedOrigins or allow wildcard
+  return config.allowedOrigins.includes(origin) || config.allowedOrigins.includes('*');
+};
+
 // 1. Security Headers via Helmet
 app.use(
   helmet({
@@ -38,23 +59,7 @@ app.use(
 // 2. Strict CORS Configuration
 const corsOptions: cors.CorsOptions = {
   origin: (origin, callback) => {
-    // Allow server-to-server, curl, and automated tests where origin header is absent
-    if (!origin) return callback(null, true);
-
-    // Always permit same-origin requests matching server port
-    if (origin === `http://localhost:${config.port}` || origin === `http://127.0.0.1:${config.port}`) {
-      return callback(null, true);
-    }
-
-    if (config.isProduction) {
-      if (config.allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error(`CORS Policy: Origin ${origin} not permitted`));
-    }
-
-    // In non-production, check allowedOrigins or allow local dev origins
-    if (config.allowedOrigins.includes(origin) || config.allowedOrigins.includes('*')) {
+    if (isOriginAllowed(origin)) {
       return callback(null, true);
     }
     return callback(new Error(`CORS Policy: Origin ${origin} not permitted`));
@@ -124,7 +129,12 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string,
   httpServer,
   {
     cors: {
-      origin: config.allowedOrigins,
+      origin: (origin, callback) => {
+        if (isOriginAllowed(origin)) {
+          return callback(null, true);
+        }
+        return callback(new Error(`Socket.IO CORS Policy: Origin ${origin} not permitted`));
+      },
       methods: ['GET', 'POST'],
       credentials: true,
     },

@@ -55,13 +55,26 @@ export function getAllowedOrigins(
     .map((o) => o.trim())
     .filter(Boolean);
 
+  // Cloud platform auto-detection (Render, Railway, custom domains)
   if (process.env.RENDER_EXTERNAL_URL) {
     const renderUrl = process.env.RENDER_EXTERNAL_URL.trim().replace(/\/$/, '');
     if (!list.includes(renderUrl)) list.push(renderUrl);
   }
+  if (process.env.RENDER_EXTERNAL_HOSTNAME) {
+    const renderHostUrl = `https://${process.env.RENDER_EXTERNAL_HOSTNAME.trim()}`.replace(/\/$/, '');
+    if (!list.includes(renderHostUrl)) list.push(renderHostUrl);
+  }
   if (process.env.RAILWAY_PUBLIC_DOMAIN) {
     const railwayUrl = `https://${process.env.RAILWAY_PUBLIC_DOMAIN.trim()}`.replace(/\/$/, '');
     if (!list.includes(railwayUrl)) list.push(railwayUrl);
+  }
+  if (process.env.RAILWAY_STATIC_URL) {
+    const railwayStaticUrl = `https://${process.env.RAILWAY_STATIC_URL.trim()}`.replace(/\/$/, '');
+    if (!list.includes(railwayStaticUrl)) list.push(railwayStaticUrl);
+  }
+  if (process.env.PUBLIC_URL) {
+    const pubUrl = process.env.PUBLIC_URL.trim().replace(/\/$/, '');
+    if (!list.includes(pubUrl)) list.push(pubUrl);
   }
 
   if (!isProd) {
@@ -72,11 +85,17 @@ export function getAllowedOrigins(
   }
 
   if (isProd) {
-    // In production, forbid wildcard '*'
-    const sanitized = list.filter((origin) => origin !== '*');
+    // In production, strictly forbid wildcard '*'
+    let sanitized = list.filter((origin) => origin !== '*');
+
+    // When cloud or custom production origins exist, strip localhost origins
+    const hasProductionOrigin = sanitized.some((o) => !o.includes('localhost') && !o.includes('127.0.0.1'));
+    if (hasProductionOrigin) {
+      sanitized = sanitized.filter((o) => !o.includes('localhost') && !o.includes('127.0.0.1'));
+    }
+
     if (sanitized.length === 0) {
-      console.warn('[Security Warning] Production CLIENT_ORIGIN cannot be wildcard or empty. Falling back to localhost.');
-      return ['http://localhost:5173', `http://localhost:${port}`];
+      return [`http://localhost:${port}`];
     }
     return sanitized;
   }
