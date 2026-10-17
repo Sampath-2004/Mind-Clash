@@ -10,7 +10,7 @@ import { useToast } from '../context/ToastContext';
 export const CreateRoomPage: React.FC = () => {
   const navigate = useNavigate();
   const { showToast } = useToast();
-  const { setCurrentPlayer, setCurrentRoom, socketId } = useGame();
+  const { createRoom } = useGame();
 
   const [nickname, setNickname] = useState('');
   const [selectedAvatar, setSelectedAvatar] = useState(AVATAR_OPTIONS[0].id);
@@ -22,6 +22,7 @@ export const CreateRoomPage: React.FC = () => {
     'reaction',
   ]);
   const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const toggleMode = (mode: GameMode) => {
     sounds.playClick();
@@ -36,7 +37,7 @@ export const CreateRoomPage: React.FC = () => {
     }
   };
 
-  const handleCreate = (e: React.FormEvent) => {
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     sounds.playClick();
 
@@ -50,45 +51,17 @@ export const CreateRoomPage: React.FC = () => {
       return;
     }
 
-    // Generate room state for preview & navigation
-    const generatedCode = 'MIND' + Math.floor(10 + Math.random() * 89);
-    const hostPlayer = {
-      id: socketId || 'player-host',
-      sessionToken: 'token-' + Math.random().toString(36).slice(2, 9),
-      nickname: trimmed,
-      avatar: selectedAvatar,
-      score: 0,
-      streak: 0,
-      isHost: true,
-      isConnected: true,
-      stats: {
-        triviaCorrect: 0,
-        triviaTotal: 0,
-        mathCorrect: 0,
-        mathTotal: 0,
-        memoryPerfectCount: 0,
-        fastestReactionMs: null,
-        highestStreak: 0,
-      },
-    };
+    setIsSubmitting(true);
+    const result = await createRoom(trimmed, selectedAvatar);
+    setIsSubmitting(false);
 
-    setCurrentPlayer(hostPlayer);
-    setCurrentRoom({
-      roomCode: generatedCode,
-      hostId: hostPlayer.id,
-      players: [hostPlayer],
-      status: 'LOBBY',
-      currentRound: 1,
-      totalRounds: roundCount,
-      activeMode: selectedModes[0],
-      settings: {
-        roundCount,
-        selectedModes,
-      },
-    });
-
-    showToast('Arena Created!', `Room ${generatedCode} is ready for competitors`, 'success');
-    navigate('/lobby');
+    if (result.success) {
+      showToast('Arena Created!', 'Room is ready for competitors', 'success');
+      navigate('/lobby');
+    } else {
+      setError(result.error || 'Failed to create room');
+      showToast('Creation Failed', result.error || 'Could not create room', 'error');
+    }
   };
 
   return (
@@ -236,10 +209,13 @@ export const CreateRoomPage: React.FC = () => {
             {/* Submit Button */}
             <button
               type="submit"
-              className="w-full py-4 rounded-2xl bg-gradient-to-r from-cyan-500 via-purple-600 to-cyan-500 hover:brightness-110 active:scale-98 text-white font-black text-sm uppercase tracking-wider shadow-xl shadow-cyan-500/20 transition-all flex items-center justify-center gap-2"
+              disabled={isSubmitting}
+              className={`w-full py-4 rounded-2xl bg-gradient-to-r from-cyan-500 via-purple-600 to-cyan-500 hover:brightness-110 active:scale-98 text-white font-black text-sm uppercase tracking-wider shadow-xl shadow-cyan-500/20 transition-all flex items-center justify-center gap-2 ${
+                isSubmitting ? 'opacity-70 cursor-not-allowed' : ''
+              }`}
             >
               <Sparkles className="w-4 h-4" />
-              Initialize Lobby
+              {isSubmitting ? 'Creating Arena...' : 'Initialize Lobby'}
             </button>
           </form>
         </div>

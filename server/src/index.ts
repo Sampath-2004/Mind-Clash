@@ -7,6 +7,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { ClientToServerEvents, ServerToClientEvents, SocketData } from '@mind-clash/shared';
+import { registerRoomHandlers } from './socket/roomHandlers.js';
 
 dotenv.config();
 
@@ -104,11 +105,12 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string,
 );
 
 io.on('connection', (socket) => {
-  console.log(`[Socket.IO] Client connected: ${socket.id}`);
+  if (process.env.NODE_ENV !== 'test') {
+    console.log(`[Socket.IO] Client connected: ${socket.id}`);
+  }
 
-  socket.on('disconnect', (reason) => {
-    console.log(`[Socket.IO] Client disconnected: ${socket.id} (Reason: ${reason})`);
-  });
+  // Register real-time room lifecycle event handlers
+  registerRoomHandlers(io, socket);
 });
 
 // 7. Graceful Shutdown Handler

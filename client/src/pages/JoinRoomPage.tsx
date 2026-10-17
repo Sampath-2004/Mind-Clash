@@ -11,12 +11,13 @@ export const JoinRoomPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { showToast } = useToast();
-  const { setCurrentPlayer, setCurrentRoom, socketId } = useGame();
+  const { joinRoom } = useGame();
 
   const [roomCode, setRoomCode] = useState('');
   const [nickname, setNickname] = useState('');
   const [selectedAvatar, setSelectedAvatar] = useState(AVATAR_OPTIONS[1].id);
   const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Pre-fill room code if passed via URL (e.g., from share link)
   useEffect(() => {
@@ -32,7 +33,7 @@ export const JoinRoomPage: React.FC = () => {
     if (error) setError(null);
   };
 
-  const handleJoin = (e: React.FormEvent) => {
+  const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault();
     sounds.playClick();
 
@@ -46,64 +47,22 @@ export const JoinRoomPage: React.FC = () => {
       setError('Nickname must be at least 2 characters');
       return;
     }
+    if (trimmed.length > 20) {
+      setError('Nickname must not exceed 20 characters');
+      return;
+    }
 
-    const joiningPlayer = {
-      id: socketId || 'player-joiner',
-      sessionToken: 'token-' + Math.random().toString(36).slice(2, 9),
-      nickname: trimmed,
-      avatar: selectedAvatar,
-      score: 0,
-      streak: 0,
-      isHost: false,
-      isConnected: true,
-      stats: {
-        triviaCorrect: 0,
-        triviaTotal: 0,
-        mathCorrect: 0,
-        mathTotal: 0,
-        memoryPerfectCount: 0,
-        fastestReactionMs: null,
-        highestStreak: 0,
-      },
-    };
+    setIsSubmitting(true);
+    const result = await joinRoom(roomCode, trimmed, selectedAvatar);
+    setIsSubmitting(false);
 
-    const mockHost = {
-      id: 'host-1',
-      sessionToken: 'token-host',
-      nickname: 'ArenaMaster',
-      avatar: 'cyber-brain',
-      score: 0,
-      streak: 0,
-      isHost: true,
-      isConnected: true,
-      stats: {
-        triviaCorrect: 0,
-        triviaTotal: 0,
-        mathCorrect: 0,
-        mathTotal: 0,
-        memoryPerfectCount: 0,
-        fastestReactionMs: null,
-        highestStreak: 0,
-      },
-    };
-
-    setCurrentPlayer(joiningPlayer);
-    setCurrentRoom({
-      roomCode,
-      hostId: mockHost.id,
-      players: [mockHost, joiningPlayer],
-      status: 'LOBBY',
-      currentRound: 1,
-      totalRounds: 5,
-      activeMode: 'trivia',
-      settings: {
-        roundCount: 5,
-        selectedModes: ['trivia', 'math', 'memory', 'reaction'],
-      },
-    });
-
-    showToast('Joined Lobby!', `Connected to Room ${roomCode}`, 'success');
-    navigate('/lobby');
+    if (result.success) {
+      showToast('Joined Lobby!', `Connected to Room ${roomCode}`, 'success');
+      navigate('/lobby');
+    } else {
+      setError(result.error || 'Failed to join room');
+      showToast('Join Failed', result.error || 'Could not join room', 'error');
+    }
   };
 
   return (
@@ -200,10 +159,13 @@ export const JoinRoomPage: React.FC = () => {
 
             <button
               type="submit"
-              className="w-full py-4 rounded-2xl bg-gradient-to-r from-purple-600 to-cyan-500 hover:brightness-110 active:scale-98 text-white font-black text-sm uppercase tracking-wider shadow-xl shadow-purple-600/25 transition-all flex items-center justify-center gap-2"
+              disabled={isSubmitting}
+              className={`w-full py-4 rounded-2xl bg-gradient-to-r from-purple-600 to-cyan-500 hover:brightness-110 active:scale-98 text-white font-black text-sm uppercase tracking-wider shadow-xl shadow-purple-600/25 transition-all flex items-center justify-center gap-2 ${
+                isSubmitting ? 'opacity-70 cursor-not-allowed' : ''
+              }`}
             >
               <LogIn className="w-4 h-4" />
-              Enter Arena
+              {isSubmitting ? 'Connecting...' : 'Enter Arena'}
             </button>
           </form>
         </div>
