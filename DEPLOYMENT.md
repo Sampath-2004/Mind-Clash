@@ -63,21 +63,24 @@ Configure the following environment variables in your platform dashboard (e.g., 
 ### AI Question Generation & Judging (Server-Only)
 > [!NOTE]
 > Keep API keys exclusively on the server. Never expose them through `VITE_` variables, client code, or version control.
-> If neither key is configured, the server gracefully falls back to the curated offline question catalog.
+> If both providers fail or neither key is configured, the server automatically recovers and starts the match using the curated offline question catalog without requiring player action.
 
 | Variable | Recommended Value | Description |
 | :--- | :--- | :--- |
 | `GEMINI_API_KEY` | `<your-gemini-api-key>` | Primary provider API key for Trivia generation and Rare Answer judging. |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | Configurable Google Gemini model identifier (default: `gemini-2.5-flash`). |
-| `OPENAI_API_KEY` | `<your-openai-api-key>` | Automatic failover provider API key if Gemini times out, errors, or hits quota. |
-| `OPENAI_MODEL` | `gpt-4o-mini` | Configurable OpenAI model identifier (default: `gpt-4o-mini`). |
+| `GROQ_API_KEY` | `<your-groq-api-key>` | Automatic failover provider API key if Gemini times out, errors, or hits quota. |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Configurable Groq model identifier (default: `llama-3.3-70b-versatile`). |
 
-### AI Usage-Budget & Concurrency Limits
+### AI Usage-Budget, Timeouts & Concurrency Limits
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
+| `AI_TOTAL_DEADLINE_MS` | `60000` (60s) | Hard ceiling for the complete AI question preparation process. |
+| `GEMINI_TIMEOUT_MS` | `30000` (30s) | Per-attempt timeout for Google Gemini API requests. |
+| `GROQ_TIMEOUT_MS` | `20000` (20s) | Per-attempt timeout for Groq API requests. |
+| `GROQ_RESERVED_TIME_MS` | `20000` (20s) | Time budget reserved for Groq failover so Gemini cannot consume the entire deadline. |
+| `AI_MAX_RETRIES` | `2` | Maximum retry attempts per provider for transient failures (429, 503, network drops). |
 | `AI_MAX_CONCURRENT_BATCHES` | `5` | Maximum simultaneous AI batch generation requests across rooms to protect API budgets. |
-| `AI_MAX_RETRIES` | `3` | Maximum bounded retry attempts per provider before triggering failover. |
-| `AI_HTTP_TIMEOUT_MS` | `12000` | Timeout in milliseconds per AI network request (12 seconds). |
 
 ### Optional Persistent History Store (Redis)
 | Variable | Default Value | Description |
@@ -183,7 +186,7 @@ Once your deployment is live, verify functionality using two independent browser
 Mind Clash includes a shared duplicate-prevention system for generated Trivia questions and Rare Answer prompts:
 - **Normalized Text Fingerprints & Stable IDs**: Questions receive deterministic SHA-256 stable IDs based on normalized keywords, stripping punctuation, diacritics, and stopwords.
 - **Paraphrase & Near-Duplicate Detection**: Evaluates token Jaccard similarity and character trigram similarity. Closely paraphrased questions (semantic similarity >= 0.65) are rejected and retried automatically.
-- **Shared Cross-Provider History**: A single history pool is used across all sources (Google Gemini, OpenAI fallback, and the curated offline bank).
+- **Shared Cross-Provider History**: A single history pool is used across all sources (Google Gemini, Groq backup, and the curated offline bank).
 - **Rematch History Preservation**: Room history is preserved across consecutive games in the same room, preventing question repeats in rematches.
 - **Lease Reservations**: Concurrent match preparations in the same room acquire atomic leases to prevent collision.
 - **Storage Adapters**:

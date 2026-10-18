@@ -8,6 +8,8 @@ import {
   aiGenerator,
   triviaAiItemSchema,
   triviaBatchAiSchema,
+  classifyError,
+  redactSecrets,
 } from '../src/services/aiGenerator.js';
 import {
   ClientToServerEvents,
@@ -15,6 +17,8 @@ import {
   ServerResponseAck,
   ActiveChallengeClient,
 } from '@mind-clash/shared';
+import { TRIVIA_BANK, getQuestionDifficulty } from '../src/modes/triviaBank.js';
+import { duplicatePrevention } from '../src/services/duplicatePrevention.js';
 
 type TestSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
@@ -282,11 +286,11 @@ describe('AI Question Generation, Structured Validation, and Failover Tests', ()
   });
 
   // ==========================================
-  // Section 3: Gemini Quota/Failure -> OpenAI Fallback
+  // Section 3: Gemini Failure / Timeout -> Groq Fallback Chain
   // ==========================================
-  describe('3. Gemini Failure and Automatic OpenAI Fallback Chain', () => {
-    it('Automatically falls back to OpenAI when Gemini throws quota exhaustion (HTTP 429)', async () => {
-      // Mock Gemini to fail
+  describe('3. Gemini Failure, Timeout, and Automatic Groq Fallback Chain', () => {
+    it('Automatically falls back to Groq when Gemini throws quota exhaustion (HTTP 429)', async () => {
+      // Mock Gemini to fail with 429
       const mockGeminiFail = {
         getGenerativeModel: () => ({
           generateContent: async () => {
@@ -295,8 +299,8 @@ describe('AI Question Generation, Structured Validation, and Failover Tests', ()
         }),
       };
 
-      // Mock OpenAI to succeed
-      const mockOpenAiSuccess = {
+      // Mock Groq to succeed
+      const mockGroqSuccess = {
         chat: {
           completions: {
             create: async () => ({
@@ -340,7 +344,7 @@ describe('AI Question Generation, Structured Validation, and Failover Tests', ()
       };
 
       aiGenerator.setGeminiClient(mockGeminiFail);
-      aiGenerator.setOpenAiClient(mockOpenAiSuccess);
+      aiGenerator.setGroqClient(mockGroqSuccess);
 
       const host = createClientSocket();
       const p2 = createClientSocket();
@@ -375,7 +379,7 @@ describe('AI Question Generation, Structured Validation, and Failover Tests', ()
         });
       });
 
-      // Match successfully started via fallback
+      // Match successfully started via Groq fallback
       await startingPromise;
 
       const round1 = await waitForEvent<{ activeChallenge: ActiveChallengeClient }>(
@@ -387,14 +391,64 @@ describe('AI Question Generation, Structured Validation, and Failover Tests', ()
         expect(round1.activeChallenge.challenge.question).toContain('World War II');
       }
 
-      // Check stats: Gemini failed, OpenAI succeeded
+      // Check stats: Gemini failed, Groq succeeded
       const stats = aiGenerator.getStats();
       expect(stats.gemini.failures).toBeGreaterThan(0);
-      expect(stats.openai.successes).toBeGreaterThan(0);
+      expect(stats.groq.successes).toBeGreaterThan(0);
     }, 15000);
 
-    it('Uses single configured provider when only OpenAI is available', async () => {
-      const mockOpenAiOnly = {
+    it('Automatically falls back to Groq when Gemini times out', async () => {
+      // Mock Gemini to simulate a request timeout
+      const mockGeminiTimeout = {
+        getGenerativeModel: () => ({
+          generateContent: async () => {
+            throw new Error('Gemini API request timed out after 30000ms');
+          },
+        }),
+      };
+
+      const mockGroqSuccess = {
+        chat: {
+          completions: {
+            create: async () => ({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      questions: [
+                        {
+                          category: 'Science',
+                          question: 'What is the most abundant gas in Earth atmosphere?',
+                          correctAnswer: 'Nitrogen',
+                          incorrectAnswers: ['Oxygen', 'Carbon Dioxide', 'Argon'],
+                          explanation: 'Nitrogen makes up roughly 78 percent of Earth atmosphere.',
+                          difficulty: 'medium',
+                        },
+                      ],
+                    }),
+                  },
+                },
+              ],
+            }),
+          },
+        },
+      };
+
+      aiGenerator.setGeminiClient(mockGeminiTimeout);
+      aiGenerator.setGroqClient(mockGroqSuccess);
+
+      const batch = await aiGenerator.generateTriviaBatch({ count: 1, difficulty: 'medium' });
+      expect(batch.length).toBe(1);
+      expect(batch[0].question).toContain('abundant gas');
+      expect(batch[0].options).toContain('Nitrogen');
+
+      const stats = aiGenerator.getStats();
+      expect(stats.gemini.failures).toBeGreaterThan(0);
+      expect(stats.groq.successes).toBeGreaterThan(0);
+    });
+
+    it('Uses single configured provider when only Groq is available', async () => {
+      const mockGroqOnly = {
         chat: {
           completions: {
             create: async () => ({
@@ -422,7 +476,7 @@ describe('AI Question Generation, Structured Validation, and Failover Tests', ()
       };
 
       aiGenerator.setGeminiClient(null); // Gemini unconfigured
-      aiGenerator.setOpenAiClient(mockOpenAiOnly);
+      aiGenerator.setGroqClient(mockGroqOnly);
 
       const batch = await aiGenerator.generateTriviaBatch({ count: 1, difficulty: 'medium' });
       expect(batch.length).toBe(1);
@@ -431,31 +485,31 @@ describe('AI Question Generation, Structured Validation, and Failover Tests', ()
   });
 
   // ==========================================
-  // Section 4: Dual Provider Failure & Interactive Host Choices
+  // Section 4: Dual Provider Failure & Automatic Offline Questions Recovery Flow
   // ==========================================
-  describe('4. Both Providers Failing, No Silent Offline Fallback, and Explicit Host Options', () => {
-    it('Halts in PREPARATION_FAILED when both providers fail, and never starts silently', async () => {
+  describe('4. Both Providers Failing, Missing Keys, and Automatic Offline Questions Recovery Flow', () => {
+    it('Automatically falls back to offline questions and starts match when both providers fail', async () => {
       // Mock both to fail
       const mockGeminiFail = {
         getGenerativeModel: () => ({
           generateContent: async () => {
-            throw new Error('Gemini service unavailable');
+            throw new Error('Gemini service unavailable (HTTP 503)');
           },
         }),
       };
 
-      const mockOpenAiFail = {
+      const mockGroqFail = {
         chat: {
           completions: {
             create: async () => {
-              throw new Error('OpenAI rate limit exceeded');
+              throw new Error('Groq rate limit exceeded (HTTP 429)');
             },
           },
         },
       };
 
       aiGenerator.setGeminiClient(mockGeminiFail);
-      aiGenerator.setOpenAiClient(mockOpenAiFail);
+      aiGenerator.setGroqClient(mockGroqFail);
 
       const host = createClientSocket();
       const p2 = createClientSocket();
@@ -476,16 +530,20 @@ describe('AI Question Generation, Structured Validation, and Failover Tests', ()
       await new Promise<void>((res) => {
         host.emit(
           'update_settings',
-          { settings: { roundCount: 2, selectedModes: ['trivia'] } },
+          { settings: { roundCount: 2, selectedModes: ['trivia'], difficulty: 'medium' } },
           () => res()
         );
       });
 
-      const failedPromise = waitForEvent<{
-        error: string;
-        canRetry: boolean;
-        canUseOffline: boolean;
-      }>(p2, 'questions_preparation_failed');
+      // Capture preparing event with fallback notice
+      let fallbackNoticeReceived = '';
+      p2.on('questions_preparing', (data) => {
+        if (data.notice) {
+          fallbackNoticeReceived = data.notice;
+        }
+      });
+
+      const startingPromise = waitForEvent(p2, 'game_starting', 10000);
 
       await new Promise<void>((res) => {
         host.emit('start_game', (resp) => {
@@ -494,80 +552,29 @@ describe('AI Question Generation, Structured Validation, and Failover Tests', ()
         });
       });
 
-      const failEvent = await failedPromise;
-      expect(failEvent.canRetry).toBe(true);
-      expect(failEvent.canUseOffline).toBe(true);
-      expect(failEvent.error).toContain('failed across all providers');
+      // Automatic offline fallback: game starts without manual interaction!
+      await startingPromise;
 
-      // Verify room status is PREPARATION_FAILED (did NOT silently start countdown)
+      expect(fallbackNoticeReceived).toContain('AI is unavailable. Starting with offline questions.');
+
       const room = roomManager.getRoom(roomCode);
-      expect(room?.status).toBe('PREPARATION_FAILED');
+      expect(room?.status).toBe('COUNTDOWN');
 
-      // Test Host Option: Play Offline Questions
-      const offlineCountdownPromise = waitForEvent(p2, 'game_starting');
-
-      await new Promise<void>((res) => {
-        host.emit('use_offline_questions', (ack) => {
-          expect(ack?.success).toBe(true);
-          res();
-        });
-      });
-
-      await offlineCountdownPromise;
-      const startedRoom = roomManager.getRoom(roomCode);
-      expect(startedRoom?.status).toBe('COUNTDOWN');
+      // Verify Round 1 starts with curated offline trivia
+      const round1 = await waitForEvent<{ activeChallenge: ActiveChallengeClient }>(
+        host,
+        'round_started',
+        6000
+      );
+      expect(round1.activeChallenge.mode).toBe('trivia');
+      if (round1.activeChallenge.mode === 'trivia') {
+        expect(round1.activeChallenge.challenge.options.length).toBe(4);
+      }
     }, 15000);
 
-    it('Permits host to Retry AI Generation after failure once provider recovers', async () => {
-      let geminiCallCount = 0;
-      const mockGeminiRecover = {
-        getGenerativeModel: () => ({
-          generateContent: async () => {
-            geminiCallCount++;
-            if (geminiCallCount <= 2) {
-              throw new Error('Temporary 503 Backend Error');
-            }
-            return {
-              response: {
-                text: () =>
-                  JSON.stringify({
-                    questions: [
-                      {
-                        category: 'Science',
-                        question: 'What is the powerhouse of the cell?',
-                        correctAnswer: 'Mitochondria',
-                        incorrectAnswers: ['Ribosome', 'Nucleus', 'Endoplasmic Reticulum'],
-                        explanation: 'Mitochondria generate most of the chemical energy needed by the cell.',
-                        difficulty: 'easy',
-                      },
-                      {
-                        category: 'Geography',
-                        question: 'Which continent has the largest land area?',
-                        correctAnswer: 'Asia',
-                        incorrectAnswers: ['Africa', 'North America', 'Europe'],
-                        explanation: 'Asia is Earth largest continent by land area and population.',
-                        difficulty: 'easy',
-                      },
-                      {
-                        category: 'History',
-                        question: 'Who was the first President of the United States?',
-                        correctAnswer: 'George Washington',
-                        incorrectAnswers: ['Thomas Jefferson', 'John Adams', 'Benjamin Franklin'],
-                        explanation: 'George Washington served as the first U.S. President from 1789 to 1797.',
-                        difficulty: 'easy',
-                      },
-                    ],
-                  }),
-              },
-            };
-          },
-        }),
-      };
-
-      aiGenerator.setGeminiClient(mockGeminiRecover);
-      aiGenerator.setOpenAiClient({
-        chat: { completions: { create: async () => { throw new Error('OpenAI unavailable'); } } },
-      });
+    it('Starts directly with offline questions when neither key is configured', async () => {
+      aiGenerator.setGeminiClient(null);
+      aiGenerator.setGroqClient(null);
 
       const host = createClientSocket();
       const p2 = createClientSocket();
@@ -588,28 +595,68 @@ describe('AI Question Generation, Structured Validation, and Failover Tests', ()
       await new Promise<void>((res) => {
         host.emit(
           'update_settings',
-          { settings: { roundCount: 1, selectedModes: ['trivia'], difficulty: 'easy' } },
+          { settings: { roundCount: 1, selectedModes: ['trivia'], difficulty: 'medium' } },
           () => res()
         );
       });
 
-      // Initial start will fail
-      const failedPromise = waitForEvent(p2, 'questions_preparation_failed');
-      host.emit('start_game');
-      await failedPromise;
+      const preparingPromise = waitForEvent<{ notice?: string; provider: string }>(p2, 'questions_preparing');
+      const startingPromise = waitForEvent(p2, 'game_starting');
 
-      // Host triggers retry_ai_generation
-      const countdownPromise = waitForEvent(p2, 'game_starting');
+      host.emit('start_game');
+
+      const prepData = await preparingPromise;
+      expect(prepData.provider).toBe('Offline Questions');
+      expect(prepData.notice).toBe('AI is unavailable. Starting with offline questions.');
+
+      await startingPromise;
+      const room = roomManager.getRoom(roomCode);
+      expect(room?.status).toBe('COUNTDOWN');
+    }, 15000);
+
+    it('Returns to lobby with clear explanation when offline question pool is exhausted', async () => {
+      aiGenerator.setGeminiClient(null);
+      aiGenerator.setGroqClient(null);
+      aiGenerator.setForceProvider('offline');
+
+      const host = createClientSocket();
+      const p2 = createClientSocket();
+      await Promise.all([ensureConnected(host), ensureConnected(p2)]);
+
+      let roomCode = '';
       await new Promise<void>((res) => {
-        host.emit('retry_ai_generation', (ack) => {
-          expect(ack?.success).toBe(true);
+        host.emit('create_room', { nickname: 'HostCaptain', avatar: 'cyber-brain' }, (r) => {
+          roomCode = r.data!.roomCode;
           res();
         });
       });
 
-      await countdownPromise;
+      await new Promise<void>((res) => {
+        p2.emit('join_room', { roomCode, nickname: 'PlayerTwo', avatar: 'plasma-dragon' }, () => res());
+      });
+
+      // Mark all offline trivia questions used for this room so the pool is exhausted
+      const usedSet = getGameEngine()!.getUsedTriviaIds(roomCode);
+      TRIVIA_BANK.forEach((q) => usedSet.add(q.id));
+
+      await new Promise<void>((res) => {
+        host.emit(
+          'update_settings',
+          { settings: { roundCount: 2, selectedModes: ['trivia'], difficulty: 'hard' } },
+          () => res()
+        );
+      });
+
+      const errorPromise = waitForEvent<{ message: string }>(p2, 'error_message');
+
+      host.emit('start_game');
+
+      const errData = await errorPromise;
+      expect(errData.message).toContain('Offline question pool exhausted');
+
+      // Room returns cleanly to LOBBY status (never starts an incomplete match)
       const room = roomManager.getRoom(roomCode);
-      expect(room?.status).toBe('COUNTDOWN');
+      expect(room?.status).toBe('LOBBY');
     }, 15000);
   });
 
@@ -709,6 +756,57 @@ describe('AI Question Generation, Structured Validation, and Failover Tests', ()
 
       expect(duplicateResult?.success).toBe(false);
       expect(duplicateResult?.error).toContain('PREPARING_QUESTIONS');
+    });
+  });
+
+  // ==========================================
+  // Section 6: Error Classification, Secret Redaction, and Timeout Defaults
+  // ==========================================
+  describe('6. Error Classification, Secret Redaction, and Timeout Defaults', () => {
+    it('Redacts Groq, Gemini, and OpenAI keys from error messages and logs', () => {
+      const sensitiveGroq = 'Failed to connect: gsk_1234567890abcdefABCDEF12345';
+      const sensitiveGemini = 'Error at https://generativelanguage.googleapis.com/v1beta?key=AIzaSyD1234567890abcdefABCDEF1234567890';
+      const sensitiveBearer = 'Authorization: Bearer gsk_secret_token_123456789';
+
+      expect(redactSecrets(sensitiveGroq)).toBe('Failed to connect: gsk_***');
+      expect(redactSecrets(sensitiveGemini)).toContain('key=***');
+      expect(redactSecrets(sensitiveGemini)).not.toContain('AIzaSyD1234567890');
+      expect(redactSecrets(sensitiveBearer)).toBe('Authorization: Bearer ***');
+    });
+
+    it('Classifies 401/403 or invalid credentials as non-transient (skips retries immediately)', () => {
+      const err401 = new Error('HTTP 401 Unauthorized: Invalid API Key');
+      const classified401 = classifyError(err401);
+      expect(classified401.isTransient).toBe(false);
+      expect(classified401.reason).toContain('Invalid or unauthorized credentials');
+
+      const errForbidden = { status: 403, message: 'Forbidden access' };
+      const classified403 = classifyError(errForbidden);
+      expect(classified403.isTransient).toBe(false);
+    });
+
+    it('Classifies 429 and parses Retry-After header and seconds correctly', () => {
+      const errWithHeader = {
+        status: 429,
+        message: 'Rate limit reached',
+        headers: { 'retry-after': '2.5' },
+      };
+      const classified = classifyError(errWithHeader);
+      expect(classified.isTransient).toBe(true);
+      expect(classified.retryAfterMs).toBe(2500);
+
+      const errWithMessage = new Error('Rate limit exceeded: please try again in 3s');
+      const classifiedMsg = classifyError(errWithMessage);
+      expect(classifiedMsg.isTransient).toBe(true);
+      expect(classifiedMsg.retryAfterMs).toBe(3000);
+    });
+
+    it('Verifies configurable provider timeout and deadline defaults', () => {
+      expect(aiGenerator.getTotalDeadlineMs()).toBe(60000);
+      expect(aiGenerator.getGeminiTimeoutMs()).toBe(30000);
+      expect(aiGenerator.getGroqTimeoutMs()).toBe(20000);
+      expect(aiGenerator.getGroqReservedTimeMs()).toBe(20000);
+      expect(aiGenerator.getGroqModel()).toBe('llama-3.3-70b-versatile');
     });
   });
 });

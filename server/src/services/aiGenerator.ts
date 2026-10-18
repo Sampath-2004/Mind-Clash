@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { z } from 'zod';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import OpenAI from 'openai';
+import { Groq } from 'groq-sdk';
 import {
   Difficulty,
   TriviaQuestionServer,
@@ -20,6 +20,101 @@ import {
   QuestionPoolExhaustedError,
   CandidateQuestion,
 } from './duplicatePrevention.js';
+
+// ==========================================
+// SECRET REDACTION & SECURITY UTILITIES
+// ==========================================
+
+export function redactSecrets(text: string): string {
+  if (!text || typeof text !== 'string') return '';
+  return text
+    .replace(/(Bearer\s+)[^\s"']+/gi, '$1***')
+    .replace(/(key=)[^\s&"']+/gi, '$1***')
+    .replace(/gsk_[a-zA-Z0-9_-]+/g, 'gsk_***')
+    .replace(/AIza[0-9A-Za-z-_]{35}/g, 'AIza***')
+    .replace(/sk-[a-zA-Z0-9_-]+/g, 'sk-***');
+}
+
+export interface ErrorClassification {
+  isTransient: boolean;
+  retryAfterMs?: number;
+  reason: string;
+}
+
+export function classifyError(err: unknown): ErrorClassification {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  const status = (err as any)?.status || (err as any)?.statusCode || 0;
+
+  // 1. Missing or invalid credentials / unauthorized / permissions -> Non-transient
+  if (
+    status === 401 ||
+    status === 403 ||
+    msg.includes('401') ||
+    msg.includes('403') ||
+    msg.includes('invalid api key') ||
+    msg.includes('invalid_api_key') ||
+    msg.includes('api_key_invalid') ||
+    msg.includes('unauthorized') ||
+    msg.includes('forbidden') ||
+    msg.includes('permission_denied') ||
+    msg.includes('no-credits') ||
+    msg.includes('insufficient_quota') ||
+    msg.includes('account_deactivated')
+  ) {
+    return { isTransient: false, reason: 'Invalid or unauthorized credentials' };
+  }
+
+  // 2. Bad request / Schema / Invalid parameter (except rate limits) -> Non-transient
+  if ((status === 400 || msg.includes('400 bad request')) && !msg.includes('rate limit')) {
+    return { isTransient: false, reason: 'Client bad request' };
+  }
+
+  // 3. Rate limits (429) -> Transient, check for Retry-After
+  let retryAfterMs: number | undefined;
+  if (status === 429 || msg.includes('429') || msg.includes('rate limit') || msg.includes('resource_exhausted')) {
+    const headers = (err as any)?.headers || (err as any)?.response?.headers;
+    const retryHeader = headers?.get?.('retry-after') || headers?.['retry-after'];
+    if (retryHeader) {
+      const parsedSeconds = parseFloat(retryHeader);
+      if (!isNaN(parsedSeconds)) {
+        retryAfterMs = Math.round(parsedSeconds * 1000);
+      }
+    } else {
+      const matchSeconds = msg.match(/(?:retry|wait|again in)\s*([\d.]+)\s*s(?:ec)?/i);
+      if (matchSeconds?.[1]) {
+        retryAfterMs = Math.round(parseFloat(matchSeconds[1]) * 1000);
+      }
+    }
+    return { isTransient: true, retryAfterMs, reason: 'Rate limit or resource exhaustion' };
+  }
+
+  // 4. Server error (500, 502, 503, 504) -> Transient
+  if (
+    (status >= 500 && status <= 599) ||
+    msg.includes('500') ||
+    msg.includes('502') ||
+    msg.includes('503') ||
+    msg.includes('504') ||
+    msg.includes('service unavailable') ||
+    msg.includes('internal error') ||
+    msg.includes('overloaded')
+  ) {
+    return { isTransient: true, reason: 'Server error' };
+  }
+
+  // 5. Network / timeout / abort
+  if (
+    msg.includes('timeout') ||
+    msg.includes('econnreset') ||
+    msg.includes('econnrefused') ||
+    msg.includes('fetch failed') ||
+    msg.includes('network')
+  ) {
+    return { isTransient: true, reason: 'Network or timeout' };
+  }
+
+  return { isTransient: true, reason: 'Unknown error' };
+}
 
 // ==========================================
 // RUNTIME ZOD SCHEMAS FOR STRUCTURED VALIDATION
@@ -99,6 +194,7 @@ export interface GenerateTriviaBatchOptions {
   signal?: AbortSignal;
   usedIds?: Set<string>;
   roomCode?: string;
+  onFallback?: (notice: string) => void;
 }
 
 export interface GenerateRareAnswerBatchOptions {
@@ -107,6 +203,7 @@ export interface GenerateRareAnswerBatchOptions {
   signal?: AbortSignal;
   usedIds?: Set<string>;
   roomCode?: string;
+  onFallback?: (notice: string) => void;
 }
 
 export interface CandidateToJudge {
@@ -129,7 +226,7 @@ export interface BatchJudgingResult {
   judgedSubmissions: JudgedSubmission[];
   isVoided: boolean;
   voidReason?: string;
-  providerUsed: 'gemini' | 'openai' | 'catalog' | null;
+  providerUsed: 'gemini' | 'groq' | 'catalog' | null;
 }
 
 export interface BatchJudgingParams {
@@ -152,10 +249,10 @@ export function normalizeAnswerText(text: string): string {
 
 export class AiGeneratorService {
   private customFetch: FetchFunction = fetch;
-  private forceProvider: 'gemini' | 'openai' | 'offline' | null = null;
+  private forceProvider: 'gemini' | 'groq' | 'offline' | null = null;
   // Mock SDK clients for testing
   private mockGeminiClient: any = null;
-  private mockOpenAiClient: any = null;
+  private mockGroqClient: any = null;
   private roomBatchReservations = new Map<string, string>(); // roomCode -> reservationId
 
   // Concurrency tracking
@@ -163,29 +260,45 @@ export class AiGeneratorService {
   private maxConcurrentBatches = Number(process.env.AI_MAX_CONCURRENT_BATCHES) || 5;
 
   // Usage budgets / telemetry
-  private providerStats: Record<'gemini' | 'openai', ProviderUsageStats> = {
+  private providerStats: Record<'gemini' | 'groq', ProviderUsageStats> = {
     gemini: { requests: 0, successes: 0, failures: 0, lastUsedAt: null },
-    openai: { requests: 0, successes: 0, failures: 0, lastUsedAt: null },
+    groq: { requests: 0, successes: 0, failures: 0, lastUsedAt: null },
   };
 
   public setFetch(fn: FetchFunction) {
     this.customFetch = fn;
   }
 
-  public setForceProvider(provider: 'gemini' | 'openai' | 'offline' | null) {
-    this.forceProvider = provider;
+  public setForceProvider(provider: 'gemini' | 'groq' | 'openai' | 'offline' | null) {
+    if (provider === 'openai') {
+      this.forceProvider = 'groq';
+    } else {
+      this.forceProvider = provider;
+    }
   }
 
   public setGeminiClient(client: any) {
     this.mockGeminiClient = client;
   }
 
+  public setGroqClient(client: any) {
+    this.mockGroqClient = client;
+  }
+
+  /**
+   * Backwards-compatible alias for existing test suites.
+   */
   public setOpenAiClient(client: any) {
-    this.mockOpenAiClient = client;
+    this.setGroqClient(client);
   }
 
   public getStats() {
-    return { ...this.providerStats, activeBatches: this.activeBatches };
+    return {
+      gemini: this.providerStats.gemini,
+      groq: this.providerStats.groq,
+      openai: this.providerStats.groq, // alias for backwards compatibility
+      activeBatches: this.activeBatches,
+    };
   }
 
   public getBatchReservation(roomCode: string): string | undefined {
@@ -209,24 +322,58 @@ export class AiGeneratorService {
   }
 
   public getGeminiModel(): string {
-    return process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+    return process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  }
+
+  public getGroqModel(): string {
+    return process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
   }
 
   public getOpenAiModel(): string {
-    return process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    return this.getGroqModel();
   }
 
-  public getTimeoutMs(): number {
-    return Number(process.env.AI_GENERATION_TIMEOUT_MS) || 12000;
+  public getTotalDeadlineMs(): number {
+    return Number(process.env.AI_TOTAL_DEADLINE_MS) || 60000;
+  }
+
+  public getGeminiTimeoutMs(): number {
+    return (
+      Number(process.env.GEMINI_TIMEOUT_MS) ||
+      Number(process.env.AI_HTTP_TIMEOUT_MS) ||
+      Number(process.env.AI_GENERATION_TIMEOUT_MS) ||
+      30000
+    );
+  }
+
+  public getGroqTimeoutMs(): number {
+    return (
+      Number(process.env.GROQ_TIMEOUT_MS) ||
+      Number(process.env.AI_HTTP_TIMEOUT_MS) ||
+      Number(process.env.AI_GENERATION_TIMEOUT_MS) ||
+      20000
+    );
+  }
+
+  public getGroqReservedTimeMs(): number {
+    return Number(process.env.GROQ_RESERVED_TIME_MS) || 20000;
   }
 
   public getMaxRetries(): number {
     return Number(process.env.AI_MAX_RETRIES) || 2;
   }
 
+  public hasAiKeysOrMocks(): boolean {
+    if (this.forceProvider === 'offline') return false;
+    if (this.forceProvider !== null) return true;
+    const hasGemini = Boolean(process.env.GEMINI_API_KEY || process.env.GEMINI_KEY || this.mockGeminiClient);
+    const hasGroq = Boolean(process.env.GROQ_API_KEY || process.env.GROQ_KEY || this.mockGroqClient);
+    return hasGemini || hasGroq;
+  }
+
   public getPrimaryProviderName(): string {
-    if (this.forceProvider === 'openai') {
-      return `OpenAI (${this.getOpenAiModel()})`;
+    if (this.forceProvider === 'groq') {
+      return `Groq (${this.getGroqModel()})`;
     }
     if (
       this.forceProvider === 'gemini' ||
@@ -236,8 +383,8 @@ export class AiGeneratorService {
     ) {
       return `Google Gemini (${this.getGeminiModel()})`;
     }
-    if (this.mockOpenAiClient || process.env.OPENAI_API_KEY || process.env.OPENAI_KEY) {
-      return `OpenAI (${this.getOpenAiModel()})`;
+    if (this.mockGroqClient || process.env.GROQ_API_KEY || process.env.GROQ_KEY) {
+      return `Groq (${this.getGroqModel()})`;
     }
     return `Google Gemini (${this.getGeminiModel()})`;
   }
@@ -248,8 +395,9 @@ export class AiGeneratorService {
 
   /**
    * Generates a fresh, validated batch of Trivia questions for a match.
-   * Gemini is primary; automatically fails over to OpenAI if Gemini fails or is unconfigured.
-   * If both fail, throws an error (never silently substitutes offline questions).
+   * Priority flow: Gemini → Groq backup → automatic offline questions.
+   * Total budget is capped at AI_TOTAL_DEADLINE_MS (60s default).
+   * Automatically prepares offline questions if providers fail or are unconfigured.
    */
   public async generateTriviaBatch(
     options: GenerateTriviaBatchOptions
@@ -260,41 +408,61 @@ export class AiGeneratorService {
     // Release any previous pending reservation for this room
     await this.releaseBatchReservation(roomCode);
 
-    const isTestEnv = process.env.NODE_ENV === 'test' || process.env.PLAYWRIGHT_TEST === 'true';
-    const hasKeysOrMocks =
-      Boolean(process.env.GEMINI_API_KEY || process.env.GEMINI_KEY || this.mockGeminiClient) ||
-      Boolean(process.env.OPENAI_API_KEY || process.env.OPENAI_KEY || this.mockOpenAiClient) ||
-      this.forceProvider !== null;
+    const hasKeysOrMocks = this.hasAiKeysOrMocks();
 
-    if (this.forceProvider === 'offline' || (isTestEnv && !hasKeysOrMocks)) {
+    if (this.forceProvider === 'offline' || !hasKeysOrMocks) {
+      options.onFallback?.('AI is unavailable. Starting with offline questions.');
       return this.generateOfflineBatch(count, difficulty, usedIds, roomCode);
     }
 
-    // Enforce concurrency limit
+    // Enforce concurrency limit: fallback gracefully to offline if overloaded
     if (this.activeBatches >= this.maxConcurrentBatches) {
-      throw new Error(
-        `AI question generation is currently at peak capacity (${this.activeBatches} active matches). Please retry.`
+      logger.warn(
+        `[AiGenerator] AI generation at peak capacity (${this.activeBatches} active batches). Falling back to offline questions.`
       );
+      options.onFallback?.('AI is unavailable. Starting with offline questions.');
+      return this.generateOfflineBatch(count, difficulty, usedIds, roomCode);
     }
 
     this.activeBatches++;
+
+    // Bounded Total Deadline Controller
+    const totalDeadlineMs = this.getTotalDeadlineMs();
+    const deadlineTime = Date.now() + totalDeadlineMs;
+    const batchController = new AbortController();
+
+    const onParentAbort = () => batchController.abort();
+    if (signal) {
+      signal.addEventListener('abort', onParentAbort);
+    }
+
+    const deadlineTimer = setTimeout(() => {
+      batchController.abort();
+    }, totalDeadlineMs);
+
     try {
       const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_KEY;
-      const openaiKey = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY;
+      const groqKey = process.env.GROQ_API_KEY || process.env.GROQ_KEY;
 
       const canUseGemini =
         (Boolean(geminiKey) || Boolean(this.mockGeminiClient)) &&
-        this.forceProvider !== 'openai';
-      const canUseOpenAi =
-        (Boolean(openaiKey) || Boolean(this.mockOpenAiClient)) &&
+        this.forceProvider !== 'groq';
+      const canUseGroq =
+        (Boolean(groqKey) || Boolean(this.mockGroqClient)) &&
         this.forceProvider !== 'gemini';
 
       let lastGeminiError: string | null = null;
       let collected: TriviaAiItem[] = [];
-      let providerUsed: 'gemini' | 'openai' | null = null;
+      let providerUsed: 'gemini' | 'groq' | null = null;
 
-      // 1. PRIMARY: Try Gemini
-      if (canUseGemini) {
+      // 1. PRIMARY: Try Gemini (reserving time budget for Groq)
+      const now = Date.now();
+      const remainingTotal = deadlineTime - now;
+      const groqReserve = canUseGroq ? this.getGroqReservedTimeMs() : 0;
+      const availableForGemini = remainingTotal - groqReserve;
+
+      if (canUseGemini && availableForGemini >= 2000 && !batchController.signal.aborted) {
+        const geminiAttemptTimeout = Math.min(this.getGeminiTimeoutMs(), availableForGemini);
         try {
           const res = await this.collectUniqueQuestions(
             'gemini',
@@ -302,57 +470,64 @@ export class AiGeneratorService {
             difficulty,
             geminiKey || 'mock-key',
             roomCode,
-            signal,
+            geminiAttemptTimeout,
+            batchController.signal,
             usedIds
           );
           collected = res.items;
           providerUsed = 'gemini';
         } catch (err: unknown) {
-          lastGeminiError = err instanceof Error ? err.message : String(err);
+          lastGeminiError = redactSecrets(err instanceof Error ? err.message : String(err));
           logger.warn(
-            `[AiGenerator] Gemini Trivia batch generation failed (${lastGeminiError}). Attempting failover to OpenAI...`
+            `[AiGenerator] Gemini Trivia batch generation failed (${lastGeminiError}). Attempting failover to Groq...`
           );
         }
       }
 
-      // Check if aborted before attempting fallback
+      // Check external abort before attempting fallback
       if (signal?.aborted) {
         throw new Error('Question generation aborted');
       }
 
-      // 2. FALLBACK: Try OpenAI if Gemini didn't complete the batch
-      if (collected.length < count && canUseOpenAi) {
+      // 2. FALLBACK: Try Groq if Gemini didn't complete the batch
+      const availableForGroq = deadlineTime - Date.now();
+      if (
+        collected.length < count &&
+        canUseGroq &&
+        availableForGroq >= 1500 &&
+        !batchController.signal.aborted
+      ) {
+        const groqAttemptTimeout = Math.min(this.getGroqTimeoutMs(), availableForGroq);
         try {
           const res = await this.collectUniqueQuestions(
-            'openai',
+            'groq',
             count,
             difficulty,
-            openaiKey || 'mock-key',
+            groqKey || 'mock-key',
             roomCode,
-            signal,
+            groqAttemptTimeout,
+            batchController.signal,
             usedIds,
             collected
           );
           collected = res.items;
-          providerUsed = 'openai';
+          providerUsed = 'groq';
         } catch (err: unknown) {
-          const openAiErr = err instanceof Error ? err.message : String(err);
-          logger.warn(`[AiGenerator] OpenAI Trivia batch generation failed (${openAiErr})`);
-          throw new Error(
-            `AI question generation failed across all providers: Primary (Gemini) failed: ${lastGeminiError || 'Not configured'}; Fallback (OpenAI) failed: ${openAiErr}`,
-            { cause: err }
-          );
+          const groqErr = redactSecrets(err instanceof Error ? err.message : String(err));
+          logger.warn(`[AiGenerator] Groq Trivia batch generation failed (${groqErr})`);
         }
       }
 
+      // 3. AUTOMATIC OFFLINE FALLBACK: If both failed, timed out, or unconfigured
       if (collected.length < count) {
-        const failureReason = lastGeminiError
-          ? `Primary provider (Gemini) failed (${lastGeminiError}) and OpenAI fallback is not configured.`
-          : 'Neither Google Gemini nor OpenAI API keys are configured on the server.';
-        throw new Error(`AI question generation unavailable: ${failureReason}`);
+        logger.info(
+          `[AiGenerator] AI generation incomplete (${collected.length}/${count}). Automatically falling back to curated offline questions.`
+        );
+        options.onFallback?.('AI is unavailable. Starting with offline questions.');
+        return this.generateOfflineBatch(count, difficulty, usedIds, roomCode);
       }
 
-      // Reserve the complete batch
+      // Reserve the complete batch in duplicatePrevention
       const candidates: CandidateQuestion[] = collected.map((item) => ({
         text: item.question,
         correctAnswer: item.correctAnswer,
@@ -373,20 +548,25 @@ export class AiGeneratorService {
 
       return this.formatBatchServer(collected, difficulty);
     } finally {
+      clearTimeout(deadlineTimer);
+      if (signal) {
+        signal.removeEventListener('abort', onParentAbort);
+      }
       this.activeBatches = Math.max(0, this.activeBatches - 1);
     }
   }
 
   /**
-   * Helper to execute an async API call with bounded retries and per-attempt timeout.
+   * Helper to execute an async API call with bounded retries, transient error handling, and timeout.
    */
   private async executeWithRetry<T>(
-    provider: 'gemini' | 'openai',
+    provider: 'gemini' | 'groq',
     fn: () => Promise<T>,
-    parentSignal?: AbortSignal
+    attemptTimeoutMs: number,
+    parentSignal?: AbortSignal,
+    maxRetriesOverride?: number
   ): Promise<T> {
-    const maxRetries = this.getMaxRetries();
-    const timeoutMs = this.getTimeoutMs();
+    const maxRetries = maxRetriesOverride ?? this.getMaxRetries();
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -397,33 +577,67 @@ export class AiGeneratorService {
       this.providerStats[provider].requests++;
       this.providerStats[provider].lastUsedAt = Date.now();
 
+      const perAttemptController = new AbortController();
+      let timer: NodeJS.Timeout | null = null;
+
       try {
-        const result = await Promise.race([
-          fn(),
-          new Promise<never>((_, reject) => {
-            const timer = setTimeout(() => {
-              reject(new Error(`${provider.toUpperCase()} API request timed out after ${timeoutMs}ms`));
-            }, timeoutMs);
-            if (parentSignal) {
-              parentSignal.addEventListener('abort', () => {
-                clearTimeout(timer);
-                reject(new Error('Question generation aborted'));
-              });
-            }
-          }),
-        ]);
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            perAttemptController.abort();
+            reject(
+              new Error(`${provider.toUpperCase()} API request timed out after ${attemptTimeoutMs}ms`)
+            );
+          }, attemptTimeoutMs);
+        });
+
+        const onParentSignalAbort = () => {
+          if (timer) clearTimeout(timer);
+          perAttemptController.abort();
+        };
+
+        if (parentSignal) {
+          parentSignal.addEventListener('abort', onParentSignalAbort);
+        }
+
+        const result = await Promise.race([fn(), timeoutPromise]);
+        if (timer) clearTimeout(timer);
+        if (parentSignal) {
+          parentSignal.removeEventListener('abort', onParentSignalAbort);
+        }
 
         this.providerStats[provider].successes++;
         return result;
       } catch (err: unknown) {
+        if (timer) clearTimeout(timer);
         this.providerStats[provider].failures++;
         lastError = err;
+
+        const classification = classifyError(err);
+        const redactedMsg = redactSecrets(err instanceof Error ? err.message : String(err));
         logger.warn(
-          `[AiGenerator] ${provider.toUpperCase()} attempt ${attempt}/${maxRetries} failed: ${err instanceof Error ? err.message : String(err)}`
+          `[AiGenerator] ${provider.toUpperCase()} attempt ${attempt}/${maxRetries} failed: ${redactedMsg} (${classification.reason})`
         );
+
+        // Non-transient failure (e.g. invalid key, 401/403) -> abort retries immediately
+        if (!classification.isTransient) {
+          throw lastError;
+        }
+
         if (attempt < maxRetries && !parentSignal?.aborted) {
-          // Bounded backoff before retry (200ms)
-          await new Promise((r) => setTimeout(r, 200));
+          // Check retry-after
+          if (classification.retryAfterMs !== undefined && classification.retryAfterMs > 0) {
+            if (classification.retryAfterMs <= 5000) {
+              await new Promise((r) => setTimeout(r, classification.retryAfterMs));
+            } else {
+              logger.warn(
+                `[AiGenerator] ${provider.toUpperCase()} requested Retry-After ${classification.retryAfterMs}ms exceeds 5000ms limit. Failing over immediately.`
+              );
+              throw lastError;
+            }
+          } else {
+            // Standard backoff: 200ms, 400ms...
+            await new Promise((r) => setTimeout(r, 200 * attempt));
+          }
         }
       }
     }
@@ -435,15 +649,16 @@ export class AiGeneratorService {
    * Validates and deduplicates a raw batch of items from an AI provider.
    */
   private async collectUniqueQuestions(
-    provider: 'gemini' | 'openai',
+    provider: 'gemini' | 'groq',
     targetCount: number,
     difficulty: Difficulty,
     apiKey: string,
     roomCode: string,
+    attemptTimeoutMs: number,
     signal?: AbortSignal,
     usedIds?: Set<string>,
     initialItems: TriviaAiItem[] = []
-  ): Promise<{ items: TriviaAiItem[]; provider: 'gemini' | 'openai' }> {
+  ): Promise<{ items: TriviaAiItem[]; provider: 'gemini' | 'groq' }> {
     const maxRetries = this.getMaxRetries();
     const collected: TriviaAiItem[] = [...initialItems];
     const seenNormalized = new Set<string>(collected.map((c) => normalizeText(c.question)));
@@ -471,7 +686,8 @@ export class AiGeneratorService {
         () =>
           provider === 'gemini'
             ? this.callGeminiTriviaBatch(fetchCount, difficulty, apiKey, signal)
-            : this.callOpenAiTriviaBatch(fetchCount, difficulty, apiKey, signal),
+            : this.callGroqTriviaBatch(fetchCount, difficulty, apiKey, signal),
+        attemptTimeoutMs,
         signal
       );
 
@@ -539,42 +755,6 @@ export class AiGeneratorService {
     }
 
     return { items: collected.slice(0, targetCount), provider };
-  }
-
-  private validateAndFilterBatch(
-    items: TriviaAiItem[],
-    requestedCount: number,
-    difficulty: Difficulty,
-    usedIds?: Set<string>
-  ): TriviaAiItem[] {
-    const seenQuestionTexts = new Set<string>();
-    const valid: TriviaAiItem[] = [];
-
-    for (const item of items) {
-      const parsed = triviaAiItemSchema.safeParse(item);
-      if (!parsed.success) continue;
-
-      const q = parsed.data;
-      const normalizedQ = q.question.trim().toLowerCase();
-
-      if (seenQuestionTexts.has(normalizedQ) || usedIds?.has(normalizedQ)) {
-        continue;
-      }
-
-      const opts = [q.correctAnswer, ...q.incorrectAnswers].map((o) => o.trim().toLowerCase());
-      if (new Set(opts).size !== 4) {
-        continue;
-      }
-
-      seenQuestionTexts.add(normalizedQ);
-      valid.push(q);
-
-      if (valid.length >= requestedCount) {
-        break;
-      }
-    }
-
-    return valid;
   }
 
   /**
@@ -716,7 +896,6 @@ export class AiGeneratorService {
       });
       rawText = result.response.text();
     } else if (this.customFetch !== fetch) {
-      // Support custom fetch for unit tests / mocked HTTP endpoints
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
       const res = await this.customFetch(url, {
         method: 'POST',
@@ -738,7 +917,6 @@ export class AiGeneratorService {
       const json = await res.json();
       rawText = json.candidates?.[0]?.content?.parts?.[0]?.text;
     } else {
-      // Official Google Generative AI SDK
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({
         model: modelName,
@@ -763,22 +941,22 @@ export class AiGeneratorService {
   }
 
   // ==========================================
-  // OPENAI CALLS
+  // GROQ CALLS
   // ==========================================
 
-  private async callOpenAiTriviaBatch(
+  private async callGroqTriviaBatch(
     count: number,
     difficulty: Difficulty,
     apiKey: string,
     signal?: AbortSignal
   ): Promise<TriviaAiItem[]> {
     const prompt = this.buildTriviaBatchPrompt(count, difficulty);
-    const modelName = this.getOpenAiModel();
+    const modelName = this.getGroqModel();
 
     let rawText: string;
 
-    if (this.mockOpenAiClient) {
-      const completion = await this.mockOpenAiClient.chat.completions.create({
+    if (this.mockGroqClient) {
+      const completion = await this.mockGroqClient.chat.completions.create({
         model: modelName,
         messages: [
           {
@@ -793,8 +971,7 @@ export class AiGeneratorService {
       });
       rawText = completion.choices[0]?.message?.content || '';
     } else if (this.customFetch !== fetch) {
-      // Support custom fetch for unit tests / mocked HTTP endpoints
-      const url = 'https://api.openai.com/v1/chat/completions';
+      const url = 'https://api.groq.com/openai/v1/chat/completions';
       const res = await this.customFetch(url, {
         method: 'POST',
         headers: {
@@ -818,15 +995,14 @@ export class AiGeneratorService {
       });
 
       if (!res.ok) {
-        throw new Error(`OpenAI HTTP error ${res.status}: ${res.statusText}`);
+        throw new Error(`Groq HTTP error ${res.status}: ${res.statusText}`);
       }
 
       const json = await res.json();
       rawText = json.choices?.[0]?.message?.content;
     } else {
-      // Official OpenAI SDK
-      const openai = new OpenAI({ apiKey });
-      const completion = await openai.chat.completions.create(
+      const groq = new Groq({ apiKey });
+      const completion = await groq.chat.completions.create(
         {
           model: modelName,
           messages: [
@@ -846,7 +1022,7 @@ export class AiGeneratorService {
       rawText = completion.choices[0]?.message?.content || '';
     }
 
-    if (!rawText) throw new Error('Empty response from OpenAI');
+    if (!rawText) throw new Error('Empty response from Groq');
 
     const parsedJson = JSON.parse(rawText);
     const batchValidated = triviaBatchAiSchema.parse(parsedJson);
@@ -862,7 +1038,7 @@ export class AiGeneratorService {
     usedIds: Set<string>,
     roomCode?: string
   ): Promise<TriviaQuestionServer> {
-    if (this.forceProvider === 'offline') {
+    if (this.forceProvider === 'offline' || !this.hasAiKeysOrMocks()) {
       const batch = await this.generateOfflineBatch(1, difficulty, usedIds, roomCode);
       return batch[0];
     }
@@ -871,7 +1047,7 @@ export class AiGeneratorService {
       if (batch.length > 0) return batch[0];
     } catch (err) {
       logger.warn('[AiGenerator] Single Trivia generation fell back to bank', {
-        error: err instanceof Error ? err.message : String(err),
+        error: redactSecrets(err instanceof Error ? err.message : String(err)),
       });
     }
     const batch = await this.generateOfflineBatch(1, difficulty, usedIds, roomCode);
@@ -890,38 +1066,58 @@ export class AiGeneratorService {
 
     await this.releaseBatchReservation(roomCode);
 
-    const isTestEnv = process.env.NODE_ENV === 'test' || process.env.PLAYWRIGHT_TEST === 'true';
-    const hasKeysOrMocks =
-      Boolean(process.env.GEMINI_API_KEY || process.env.GEMINI_KEY || this.mockGeminiClient) ||
-      Boolean(process.env.OPENAI_API_KEY || process.env.OPENAI_KEY || this.mockOpenAiClient) ||
-      this.forceProvider !== null;
+    const hasKeysOrMocks = this.hasAiKeysOrMocks();
 
-    if (this.forceProvider === 'offline' || (isTestEnv && !hasKeysOrMocks)) {
+    if (this.forceProvider === 'offline' || !hasKeysOrMocks) {
+      options.onFallback?.('AI is unavailable. Starting with offline questions.');
       return this.generateOfflineRareBatch(count, difficulty, usedIds, roomCode);
     }
 
     if (this.activeBatches >= this.maxConcurrentBatches) {
-      throw new Error(
-        `AI question generation is currently at peak capacity (${this.activeBatches} active matches). Please retry.`
+      logger.warn(
+        `[AiGenerator] AI generation at peak capacity (${this.activeBatches} active batches). Falling back to offline Rare Answer.`
       );
+      options.onFallback?.('AI is unavailable. Starting with offline questions.');
+      return this.generateOfflineRareBatch(count, difficulty, usedIds, roomCode);
     }
 
     this.activeBatches++;
+
+    const totalDeadlineMs = this.getTotalDeadlineMs();
+    const deadlineTime = Date.now() + totalDeadlineMs;
+    const batchController = new AbortController();
+
+    const onParentAbort = () => batchController.abort();
+    if (signal) {
+      signal.addEventListener('abort', onParentAbort);
+    }
+
+    const deadlineTimer = setTimeout(() => {
+      batchController.abort();
+    }, totalDeadlineMs);
+
     try {
       const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_KEY;
-      const openaiKey = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY;
+      const groqKey = process.env.GROQ_API_KEY || process.env.GROQ_KEY;
 
       const canUseGemini =
         (Boolean(geminiKey) || Boolean(this.mockGeminiClient)) &&
-        this.forceProvider !== 'openai';
-      const canUseOpenAi =
-        (Boolean(openaiKey) || Boolean(this.mockOpenAiClient)) &&
+        this.forceProvider !== 'groq';
+      const canUseGroq =
+        (Boolean(groqKey) || Boolean(this.mockGroqClient)) &&
         this.forceProvider !== 'gemini';
 
       let lastGeminiError: string | null = null;
       let collected: RareAnswerAiResult[] = [];
 
-      if (canUseGemini) {
+      const now = Date.now();
+      const remainingTotal = deadlineTime - now;
+      const groqReserve = canUseGroq ? this.getGroqReservedTimeMs() : 0;
+      const availableForGemini = remainingTotal - groqReserve;
+
+      // 1. PRIMARY: Try Gemini
+      if (canUseGemini && availableForGemini >= 2000 && !batchController.signal.aborted) {
+        const geminiAttemptTimeout = Math.min(this.getGeminiTimeoutMs(), availableForGemini);
         try {
           const res = await this.collectUniqueRarePrompts(
             'gemini',
@@ -929,14 +1125,15 @@ export class AiGeneratorService {
             difficulty,
             geminiKey || 'mock-key',
             roomCode,
-            signal,
+            geminiAttemptTimeout,
+            batchController.signal,
             usedIds
           );
           collected = res.items;
         } catch (err: unknown) {
-          lastGeminiError = err instanceof Error ? err.message : String(err);
+          lastGeminiError = redactSecrets(err instanceof Error ? err.message : String(err));
           logger.warn(
-            `[AiGenerator] Gemini Rare Answer batch generation failed (${lastGeminiError}). Attempting failover to OpenAI...`
+            `[AiGenerator] Gemini Rare Answer batch generation failed (${lastGeminiError}). Attempting failover to Groq...`
           );
         }
       }
@@ -945,29 +1142,41 @@ export class AiGeneratorService {
         throw new Error('Question generation aborted');
       }
 
-      if (collected.length < count && canUseOpenAi) {
+      // 2. FALLBACK: Try Groq
+      const availableForGroq = deadlineTime - Date.now();
+      if (
+        collected.length < count &&
+        canUseGroq &&
+        availableForGroq >= 1500 &&
+        !batchController.signal.aborted
+      ) {
+        const groqAttemptTimeout = Math.min(this.getGroqTimeoutMs(), availableForGroq);
         try {
           const res = await this.collectUniqueRarePrompts(
-            'openai',
+            'groq',
             count,
             difficulty,
-            openaiKey || 'mock-key',
+            groqKey || 'mock-key',
             roomCode,
-            signal,
+            groqAttemptTimeout,
+            batchController.signal,
             usedIds,
             collected
           );
           collected = res.items;
         } catch (err: unknown) {
-          const openAiError = err instanceof Error ? err.message : String(err);
-          logger.warn(`[AiGenerator] OpenAI Rare Answer failover also failed (${openAiError}).`);
+          const groqError = redactSecrets(err instanceof Error ? err.message : String(err));
+          logger.warn(`[AiGenerator] Groq Rare Answer failover also failed (${groqError}).`);
         }
       }
 
+      // 3. AUTOMATIC OFFLINE FALLBACK
       if (collected.length < count) {
-        throw new Error(
-          `Failed to generate ${count} unique Rare Answer prompts. (Gemini: ${lastGeminiError || 'skipped'}, OpenAI: failed/skipped)`
+        logger.info(
+          `[AiGenerator] AI Rare Answer generation incomplete (${collected.length}/${count}). Automatically falling back to offline challenges.`
         );
+        options.onFallback?.('AI is unavailable. Starting with offline questions.');
+        return this.generateOfflineRareBatch(count, difficulty, usedIds, roomCode);
       }
 
       // Reserve prepared batch in duplicatePrevention
@@ -993,6 +1202,10 @@ export class AiGeneratorService {
 
       return collected.map((item) => this.formatRareAnswerServer(item, difficulty));
     } finally {
+      clearTimeout(deadlineTimer);
+      if (signal) {
+        signal.removeEventListener('abort', onParentAbort);
+      }
       this.activeBatches = Math.max(0, this.activeBatches - 1);
     }
   }
@@ -1046,8 +1259,6 @@ export class AiGeneratorService {
     });
 
     if (available.length < count) {
-      // If we filtered out items only because of past global history from other matches,
-      // allow recycling past global items as long as they were never used in this room and are not reserved by other active rooms.
       const roomRestricted = pool.filter((item) => {
         const stableId = generateStableId('rare_answer', item.prompt);
         if (usedIds?.has(item.id) || usedIds?.has(stableId) || usedIds?.has(item.prompt)) return false;
@@ -1102,15 +1313,16 @@ export class AiGeneratorService {
   }
 
   private async collectUniqueRarePrompts(
-    provider: 'gemini' | 'openai',
+    provider: 'gemini' | 'groq',
     targetCount: number,
     difficulty: Difficulty,
     apiKey: string,
     roomCode: string,
+    attemptTimeoutMs: number,
     signal?: AbortSignal,
     usedIds?: Set<string>,
     initialItems: RareAnswerAiResult[] = []
-  ): Promise<{ items: RareAnswerAiResult[]; provider: 'gemini' | 'openai' }> {
+  ): Promise<{ items: RareAnswerAiResult[]; provider: 'gemini' | 'groq' }> {
     const maxRetries = this.getMaxRetries();
     const collected: RareAnswerAiResult[] = [...initialItems];
     const seenNormalized = new Set<string>(collected.map((c) => normalizeText(c.prompt)));
@@ -1137,7 +1349,8 @@ export class AiGeneratorService {
         () =>
           provider === 'gemini'
             ? this.callGeminiRareAnswerBatch(fetchCount, difficulty, apiKey, signal)
-            : this.callOpenAiRareAnswerBatch(fetchCount, difficulty, apiKey, signal),
+            : this.callGroqRareAnswerBatch(fetchCount, difficulty, apiKey, signal),
+        attemptTimeoutMs,
         signal
       );
 
@@ -1183,9 +1396,9 @@ export class AiGeneratorService {
 
   /**
    * Evaluates all player answers in a batch after a Rare Answer round.
+   * Priority flow: Gemini → Groq backup → curated offline catalog.
    * Treats player text as untrusted data, never model instructions.
-   * Enforces server-authoritative uniqueness scoring:
-   * Math.round(100 / countOfEquivalentAnswers), 0 for invalid/blank, no speed bonus.
+   * If unjudgeable without AI, voids round for everyone. Never marks an unjudgeable answer incorrect.
    */
   public async judgeRareAnswerBatch(
     params: BatchJudgingParams
@@ -1244,20 +1457,20 @@ export class AiGeneratorService {
       text: v.text,
     }));
 
-    // 3. Attempt AI judging: Gemini first, failover to OpenAI
+    // 3. Attempt AI judging: Gemini first, failover to Groq
     let evaluations: z.infer<typeof judgingItemSchema>[] | null = null;
-    let providerUsed: 'gemini' | 'openai' | 'catalog' | null = null;
+    let providerUsed: 'gemini' | 'groq' | 'catalog' | null = null;
 
     const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_KEY;
-    const openaiKey = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY;
+    const groqKey = process.env.GROQ_API_KEY || process.env.GROQ_KEY;
 
     const canUseGemini =
       (Boolean(geminiKey) || Boolean(this.mockGeminiClient)) &&
-      this.forceProvider !== 'openai' &&
+      this.forceProvider !== 'groq' &&
       this.forceProvider !== 'offline';
 
-    const canUseOpenAi =
-      (Boolean(openaiKey) || Boolean(this.mockOpenAiClient)) &&
+    const canUseGroq =
+      (Boolean(groqKey) || Boolean(this.mockGroqClient)) &&
       this.forceProvider !== 'gemini' &&
       this.forceProvider !== 'offline';
 
@@ -1274,25 +1487,25 @@ export class AiGeneratorService {
         providerUsed = 'gemini';
       } catch (err: unknown) {
         logger.warn(
-          `[AiGenerator] Gemini judging failed (${err instanceof Error ? err.message : String(err)}). Failing over to OpenAI...`
+          `[AiGenerator] Gemini judging failed (${redactSecrets(err instanceof Error ? err.message : String(err))}). Failing over to Groq...`
         );
       }
     }
 
-    if (!evaluations && canUseOpenAi) {
+    if (!evaluations && canUseGroq) {
       try {
-        evaluations = await this.callOpenAiJudging(
+        evaluations = await this.callGroqJudging(
           prompt,
           category,
           difficulty,
           candidatesToJudge,
-          openaiKey || 'mock-key',
+          groqKey || 'mock-key',
           signal
         );
-        providerUsed = 'openai';
+        providerUsed = 'groq';
       } catch (err: unknown) {
         logger.warn(
-          `[AiGenerator] OpenAI judging failed (${err instanceof Error ? err.message : String(err)}). Falling back to curated catalog...`
+          `[AiGenerator] Groq judging failed (${redactSecrets(err instanceof Error ? err.message : String(err))}). Falling back to curated catalog...`
         );
       }
     }
@@ -1352,7 +1565,6 @@ export class AiGeneratorService {
     });
 
     // 7. Group valid players by canonical answer
-    // Equivalent answers must receive the same validity decision and group together
     const canonicalGroups = new Map<string, string[]>(); // normCanonical -> playerIds[]
 
     nonEmptyEntries.forEach((entry) => {
@@ -1365,10 +1577,7 @@ export class AiGeneratorService {
       }
     });
 
-    // 8. Calculate Server-Authoritative Uniqueness Scoring:
-    // Blank or invalid answer: 0
-    // Valid answer: Math.round(100 / countOfEquivalentAnswers)
-    // 1 player -> 100, 2 players -> 50, 3 players -> 33, no speed bonus
+    // 8. Server-authoritative uniqueness scoring
     const judgedSubmissions: JudgedSubmission[] = [];
 
     // Empty submissions
@@ -1509,7 +1718,7 @@ Return a valid JSON object matching this schema:
     return list;
   }
 
-  private async callOpenAiJudging(
+  private async callGroqJudging(
     prompt: string,
     category: string,
     difficulty: Difficulty,
@@ -1536,11 +1745,11 @@ IMPORTANT SECURITY & VALIDATION INSTRUCTIONS:
 - If an answer is invalid, off-topic, or factually wrong, set isValid: false.
 You must return valid JSON with an "evaluations" array containing objects with: id, canonicalAnswer, isValid, and explanation.`;
 
-    const modelName = this.getOpenAiModel();
+    const modelName = this.getGroqModel();
     let rawText: string;
 
-    if (this.mockOpenAiClient) {
-      const completion = await this.mockOpenAiClient.chat.completions.create({
+    if (this.mockGroqClient) {
+      const completion = await this.mockGroqClient.chat.completions.create({
         model: modelName,
         messages: [
           { role: 'system', content: systemPrompt },
@@ -1550,7 +1759,7 @@ You must return valid JSON with an "evaluations" array containing objects with: 
       });
       rawText = completion.choices[0]?.message?.content || '';
     } else if (this.customFetch !== fetch) {
-      const url = 'https://api.openai.com/v1/chat/completions';
+      const url = 'https://api.groq.com/openai/v1/chat/completions';
       const res = await this.customFetch(url, {
         method: 'POST',
         headers: {
@@ -1560,7 +1769,10 @@ You must return valid JSON with an "evaluations" array containing objects with: 
         body: JSON.stringify({
           model: modelName,
           messages: [
-            { role: 'system', content: systemPrompt },
+            {
+              role: 'system',
+              content: systemPrompt,
+            },
             { role: 'user', content: userPrompt },
           ],
           response_format: { type: 'json_object' },
@@ -1569,24 +1781,27 @@ You must return valid JSON with an "evaluations" array containing objects with: 
         signal,
       });
 
-      if (!res.ok) throw new Error(`OpenAI judging HTTP error ${res.status}: ${res.statusText}`);
+      if (!res.ok) throw new Error(`Groq judging HTTP error ${res.status}: ${res.statusText}`);
       const json = await res.json();
       rawText = json.choices?.[0]?.message?.content;
     } else {
-      const openai = new OpenAI({ apiKey });
-      const completion = await openai.chat.completions.create({
-        model: modelName,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        response_format: { type: 'json_object' },
-        temperature: 0.1,
-      });
+      const groq = new Groq({ apiKey });
+      const completion = await groq.chat.completions.create(
+        {
+          model: modelName,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          response_format: { type: 'json_object' },
+          temperature: 0.1,
+        },
+        { signal }
+      );
       rawText = completion.choices[0]?.message?.content || '';
     }
 
-    if (!rawText) throw new Error('Empty response from OpenAI judging');
+    if (!rawText) throw new Error('Empty response from Groq judging');
     const parsed = JSON.parse(rawText);
     const validated = judgingResponseSchema.parse(parsed);
     const list = Array.isArray(validated) ? validated : validated.evaluations;
@@ -1594,7 +1809,7 @@ You must return valid JSON with an "evaluations" array containing objects with: 
     const returnedIds = new Set(list.map((l) => l.id));
     for (const c of candidates) {
       if (!returnedIds.has(c.id)) {
-        throw new Error(`OpenAI judging missing evaluation for candidate id ${c.id}`);
+        throw new Error(`Groq judging missing evaluation for candidate id ${c.id}`);
       }
     }
     return list;
@@ -1659,18 +1874,18 @@ You must return valid JSON with an "evaluations" array containing objects with: 
     return Array.isArray(validated) ? validated : validated.challenges;
   }
 
-  private async callOpenAiRareAnswerBatch(
+  private async callGroqRareAnswerBatch(
     count: number,
     difficulty: Difficulty,
     apiKey: string,
     signal?: AbortSignal
   ): Promise<RareAnswerAiResult[]> {
     const prompt = this.buildRareAnswerBatchPrompt(count, difficulty);
-    const modelName = this.getOpenAiModel();
+    const modelName = this.getGroqModel();
 
     let rawText: string;
-    if (this.mockOpenAiClient) {
-      const completion = await this.mockOpenAiClient.chat.completions.create({
+    if (this.mockGroqClient) {
+      const completion = await this.mockGroqClient.chat.completions.create({
         model: modelName,
         messages: [
           { role: 'system', content: 'You are a game show challenge writer. Return JSON.' },
@@ -1680,7 +1895,7 @@ You must return valid JSON with an "evaluations" array containing objects with: 
       });
       rawText = completion.choices[0]?.message?.content || '';
     } else if (this.customFetch !== fetch) {
-      const url = 'https://api.openai.com/v1/chat/completions';
+      const url = 'https://api.groq.com/openai/v1/chat/completions';
       const res = await this.customFetch(url, {
         method: 'POST',
         headers: {
@@ -1702,12 +1917,12 @@ You must return valid JSON with an "evaluations" array containing objects with: 
         signal,
       });
 
-      if (!res.ok) throw new Error(`OpenAI HTTP error ${res.status}: ${res.statusText}`);
+      if (!res.ok) throw new Error(`Groq HTTP error ${res.status}: ${res.statusText}`);
       const json = await res.json();
       rawText = json.choices?.[0]?.message?.content;
     } else {
-      const openai = new OpenAI({ apiKey });
-      const completion = await openai.chat.completions.create({
+      const groq = new Groq({ apiKey });
+      const completion = await groq.chat.completions.create({
         model: modelName,
         messages: [
           {
@@ -1722,23 +1937,13 @@ You must return valid JSON with an "evaluations" array containing objects with: 
       rawText = completion.choices[0]?.message?.content || '';
     }
 
-    if (!rawText) throw new Error('Empty response from OpenAI');
+    if (!rawText) throw new Error('Empty response from Groq');
     const parsed = JSON.parse(rawText);
     if (parsed.category && parsed.prompt) {
       return [rareAnswerAiSchema.parse(parsed)];
     }
     const validated = rareAnswerBatchAiSchema.parse(parsed);
     return Array.isArray(validated) ? validated : validated.challenges;
-  }
-
-  private async callGeminiRareAnswer(difficulty: Difficulty, apiKey: string): Promise<RareAnswerAiResult> {
-    const list = await this.callGeminiRareAnswerBatch(1, difficulty, apiKey);
-    return list[0];
-  }
-
-  private async callOpenAiRareAnswer(difficulty: Difficulty, apiKey: string): Promise<RareAnswerAiResult> {
-    const list = await this.callOpenAiRareAnswerBatch(1, difficulty, apiKey);
-    return list[0];
   }
 
   // ==========================================
@@ -1805,10 +2010,6 @@ Return valid JSON with:
   ]
 }
 Include at least 15 valid lowercase answers in "acceptableAnswers" for each challenge.`;
-  }
-
-  private buildRareAnswerPrompt(difficulty: Difficulty): string {
-    return this.buildRareAnswerBatchPrompt(1, difficulty);
   }
 
   private formatRareAnswerServer(

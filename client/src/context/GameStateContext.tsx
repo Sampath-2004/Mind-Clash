@@ -41,7 +41,7 @@ export interface GameContextValue {
   retryAiGeneration: () => Promise<{ success: boolean; error?: string }>;
   useOfflineQuestions: () => Promise<{ success: boolean; error?: string }>;
   cancelMatch: () => Promise<{ success: boolean; error?: string }>;
-  preparingInfo: { count: number; provider: string } | null;
+  preparingInfo: { count: number; provider: string; notice?: string } | null;
   preparationError: { error: string; canRetry: boolean; canUseOffline: boolean } | null;
   clockOffsetMs: number;
   submittedPlayerIds: Set<string>;
@@ -84,7 +84,7 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [podiumData, setPodiumData] = useState<GameOverPodiumData | null>(null);
   const [isMuted, setIsMuted] = useState<boolean>(sounds.getMuted());
   const [clockOffsetMs, setClockOffsetMs] = useState<number>(0);
-  const [preparingInfo, setPreparingInfo] = useState<{ count: number; provider: string } | null>(null);
+  const [preparingInfo, setPreparingInfo] = useState<{ count: number; provider: string; notice?: string } | null>(null);
   const [preparationError, setPreparationError] = useState<{
     error: string;
     canRetry: boolean;
@@ -215,7 +215,7 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
     }
 
-    function onQuestionsPreparing(data: { count: number; provider: string }) {
+    function onQuestionsPreparing(data: { count: number; provider: string; notice?: string }) {
       setPreparingInfo(data);
       setPreparationError(null);
     }

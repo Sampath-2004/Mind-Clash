@@ -276,8 +276,17 @@ export const LobbyPage: React.FC = () => {
               <h3 className="text-xl font-black text-white uppercase tracking-wider">
                 Preparing Questions
               </h3>
+              {preparingInfo?.notice && (
+                <div
+                  data-testid="offline-fallback-notice"
+                  className="p-3 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs font-bold flex items-center justify-center gap-2 shadow-lg animate-pulse"
+                >
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>{preparingInfo.notice}</span>
+                </div>
+              )}
               <p className="text-xs text-slate-300 leading-relaxed">
-                Synthesizing fresh, validated Trivia questions for{' '}
+                Synthesizing fresh, validated questions for{' '}
                 <strong className="text-cyan-400 uppercase">{room.settings.difficulty}</strong> difficulty.
                 All players will receive the same synchronized questions and randomized options.
               </p>

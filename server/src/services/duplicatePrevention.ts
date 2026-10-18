@@ -18,7 +18,7 @@ export interface HistoryEntry {
   category?: string;
   difficulty?: Difficulty;
   roomCode?: string;
-  source?: 'gemini' | 'openai' | 'offline';
+  source?: 'gemini' | 'groq' | 'openai' | 'offline';
   recordedAt: number;
   expiresAt: number;
 }
@@ -611,7 +611,7 @@ export interface CheckAndReserveOptions {
   roomCode: string;
   type: QuestionType;
   candidates: CandidateQuestion[];
-  source?: 'gemini' | 'openai' | 'offline';
+  source?: 'gemini' | 'groq' | 'openai' | 'offline';
   reservationTtlMs?: number; // default 5 minutes
   historyTtlMs?: number; // default 24 hours
 }

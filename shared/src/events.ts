@@ -147,7 +147,7 @@ export interface ServerToClientEvents {
   player_left: (data: { playerId: string; newHostId?: string }) => void;
   player_disconnected: (playerId: string) => void;
   player_reconnected: (player: Player) => void;
-  questions_preparing: (data: { count: number; provider: string }) => void;
+  questions_preparing: (data: { count: number; provider: string; notice?: string }) => void;
   questions_preparation_failed: (data: { error: string; canRetry: boolean; canUseOffline: boolean }) => void;
   game_starting: (data: { countdownMs: number; serverTime: number }) => void;
   round_intro: (data: {

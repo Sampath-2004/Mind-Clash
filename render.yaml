@@ -19,17 +19,23 @@ services:
         value: "gemini-2.5-flash"
       - key: GEMINI_API_KEY
         sync: false
-      - key: OPENAI_MODEL
-        value: "gpt-4o-mini"
-      - key: OPENAI_API_KEY
+      - key: GROQ_MODEL
+        value: "llama-3.3-70b-versatile"
+      - key: GROQ_API_KEY
         sync: false
       # AI Usage-Budget & Concurrency Controls
       - key: AI_MAX_CONCURRENT_BATCHES
         value: "5"
       - key: AI_MAX_RETRIES
-        value: "3"
-      - key: AI_HTTP_TIMEOUT_MS
-        value: "12000"
+        value: "2"
+      - key: AI_TOTAL_DEADLINE_MS
+        value: "60000"
+      - key: GEMINI_TIMEOUT_MS
+        value: "30000"
+      - key: GROQ_TIMEOUT_MS
+        value: "20000"
+      - key: GROQ_RESERVED_TIME_MS
+        value: "20000"
       # Optional Persistent Question Duplicate-Prevention Store (Redis)
       # NOTE: Active multiplayer matches are held in-memory and cleared on server restart.
       - key: REDIS_URL

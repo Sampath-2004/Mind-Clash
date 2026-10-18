@@ -28,8 +28,8 @@ import {
 import { generateMathQuestion } from '../modes/mathGenerator.js';
 import { generateMemoryChallenge } from '../modes/memoryGenerator.js';
 import { generateReactionChallenge } from '../modes/reactionGenerator.js';
-import { aiGenerator } from '../services/aiGenerator.js';
-import { duplicatePrevention } from '../services/duplicatePrevention.js';
+import { aiGenerator, redactSecrets } from '../services/aiGenerator.js';
+import { duplicatePrevention, QuestionPoolExhaustedError } from '../services/duplicatePrevention.js';
 import { logger } from '../utils/logger.js';
 
 export interface PlayerSubmission {
@@ -77,6 +77,24 @@ export class GameEngine {
     io: Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>
   ) {
     this.io = io;
+  }
+
+  public getUsedTriviaIds(roomCode: string): Set<string> {
+    let set = this.usedTriviaIds.get(roomCode);
+    if (!set) {
+      set = new Set();
+      this.usedTriviaIds.set(roomCode, set);
+    }
+    return set;
+  }
+
+  public getUsedRareIds(roomCode: string): Set<string> {
+    let set = this.usedRareIds.get(roomCode);
+    if (!set) {
+      set = new Set();
+      this.usedRareIds.set(roomCode, set);
+    }
+    return set;
   }
 
   /**
@@ -170,11 +188,13 @@ export class GameEngine {
     // Question generation required: Enter PREPARING_QUESTIONS state
     room.status = 'PREPARING_QUESTIONS';
     const primaryProviderName = aiGenerator.getPrimaryProviderName();
+    const hasAi = aiGenerator.hasAiKeysOrMocks();
 
     this.io.to(room.roomCode).emit('room_state_updated', this.sanitizeRoom(room));
     this.io.to(room.roomCode).emit('questions_preparing', {
       count: triviaRoundsCount + rareRoundsCount,
-      provider: primaryProviderName,
+      provider: hasAi ? primaryProviderName : 'Offline Questions',
+      notice: hasAi ? undefined : 'AI is unavailable. Starting with offline questions.',
     });
 
     // Run batch preparation asynchronously
@@ -189,6 +209,14 @@ export class GameEngine {
     const controller = new AbortController();
     this.batchAbortControllers.set(room.roomCode, controller);
 
+    const onFallbackNotice = (notice: string) => {
+      this.io.to(room.roomCode).emit('questions_preparing', {
+        count: triviaCount + rareCount,
+        provider: 'Offline Questions',
+        notice,
+      });
+    };
+
     try {
       if (triviaCount > 0) {
         const batch = await aiGenerator.generateTriviaBatch({
@@ -197,6 +225,7 @@ export class GameEngine {
           signal: controller.signal,
           usedIds: this.usedTriviaIds.get(room.roomCode),
           roomCode: room.roomCode,
+          onFallback: onFallbackNotice,
         });
         this.preparedTriviaBatches.set(room.roomCode, batch);
       }
@@ -208,6 +237,7 @@ export class GameEngine {
           signal: controller.signal,
           usedIds: this.usedRareIds.get(room.roomCode),
           roomCode: room.roomCode,
+          onFallback: onFallbackNotice,
         });
         this.preparedRareBatches.set(room.roomCode, rareBatch);
       }
@@ -239,7 +269,18 @@ export class GameEngine {
       }
 
       this.batchAbortControllers.delete(room.roomCode);
-      const message = err instanceof Error ? err.message : String(err);
+
+      // Handle offline question pool exhaustion: return cleanly to lobby with options
+      if (err instanceof QuestionPoolExhaustedError || (err as any)?.name === 'QuestionPoolExhaustedError') {
+        this.returnToLobby(room);
+        this.io.to(room.roomCode).emit('error_message', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      const message = redactSecrets(rawMessage);
       logger.error(`[GameEngine] Failed to prepare AI batch for room ${room.roomCode}`, {
         error: message,
       });
@@ -325,7 +366,15 @@ export class GameEngine {
 
       this.beginCountdown(room);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof QuestionPoolExhaustedError || (err as any)?.name === 'QuestionPoolExhaustedError') {
+        this.returnToLobby(room);
+        this.io.to(room.roomCode).emit('error_message', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+
+      const message = redactSecrets(err instanceof Error ? err.message : String(err));
       logger.error(`[GameEngine] Failed to prepare offline batches for room ${room.roomCode}`, {
         error: message,
       });
@@ -930,6 +979,23 @@ export class GameEngine {
             reason: judgingResult.voidReason || 'Round could not be judged fairly',
             replacementOffered: true,
           });
+
+          // Fetch an offline-supported challenge from curated bank with accepted answers
+          try {
+            const usedRare = this.usedRareIds.get(room.roomCode) || new Set();
+            const offlineReplacement = await aiGenerator.generateOfflineRareBatch(
+              1,
+              room.settings.difficulty || 'medium',
+              usedRare,
+              room.roomCode
+            );
+            const existingPrepared = this.preparedRareBatches.get(room.roomCode) || [];
+            this.preparedRareBatches.set(room.roomCode, [offlineReplacement[0], ...existingPrepared]);
+          } catch (prepErr) {
+            logger.warn('[GameEngine] Failed to prepare offline replacement challenge', {
+              error: redactSecrets(prepErr instanceof Error ? prepErr.message : String(prepErr)),
+            });
+          }
 
           // Queue replacement challenge for current round
           setTimeout(() => {
