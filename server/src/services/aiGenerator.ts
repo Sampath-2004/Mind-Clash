@@ -1957,7 +1957,7 @@ You must return valid JSON with an "evaluations" array containing objects with: 
         'DIFFICULTY: EASY.\n- Focus on widely known, familiar facts.\n- Use straightforward, simple wording.\n- Avoid obscure terminology.\n- Distractors should be clear and realistic but definitely incorrect.';
     } else if (difficulty === 'medium') {
       guidelines =
-        'DIFFICULTY: MEDIUM.\n- Broader general knowledge across science, history, geography, tech, or culture.\n- Moderately challenging options that require solid recall.\n- Distractors should be realistic and plausible.';
+        'DIFFICULTY: MEDIUM.\n- Moderately deep general knowledge across science, history, geography, technology, arts, and society.\n- Questions should require specific recall or conceptual understanding rather than simple surface recognition.\n- Distractors must be highly plausible, closely related terms or peers from the same domain/context (e.g. matching eras, taxonomic families, chemical categories, or geographical neighbors), avoiding obvious give-aways.\n- Avoid obscure facts or niche trivia as the only challenge; focus on solid, well-formulated facts that reward knowledgeable players.';
     } else {
       guidelines =
         'DIFFICULTY: HARD.\n- Deeper academic, scientific, historical, or specialized knowledge.\n- Highly plausible distractors from the same era/field.\n- Keep wording clear and free of trick questions or ambiguous semantics.';
@@ -1990,7 +1990,7 @@ Return valid JSON with key "questions" containing an array of objects:
         'DIFFICULTY: EASY.\n- Familiar, everyday categories with dozens of obvious valid answers.\n- Examples: Animals that can fly, common fruits, musical instruments, ball sports.';
     } else if (difficulty === 'medium') {
       guidelines =
-        'DIFFICULTY: MEDIUM.\n- More specific categories with 15-40 valid answers.\n- Examples: European capital cities, chemical elements, countries in South America, major oceans and seas.';
+        'DIFFICULTY: MEDIUM.\n- More specific but familiar, well-known bounded categories with approximately 15-35 valid answers.\n- Examples: European national capitals, chemical elements on the periodic table, countries in South America, major world deserts, languages with Cyrillic alphabets, programming languages.\n- Must remain familiar to educated players, requiring specific recall rather than vast open-ended everyday items.';
     } else {
       guidelines =
         'DIFFICULTY: HARD.\n- Specialized but clearly bounded categories with 10-30 valid answers.\n- Examples: African capital cities, Shakespearean plays, Apollo moonwalkers, landlocked European nations.';

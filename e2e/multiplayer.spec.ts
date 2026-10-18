@@ -260,4 +260,83 @@ test.describe('E2E Multiplayer Flow: Two Independent Browser Contexts', () => {
     await hostContext.close();
     await guestContext.close();
   });
+
+  test('Memory Matrix: Visibly verifies sequence preview during Memorize, locked buttons, and transition to Recall', async ({ browser }) => {
+    const hostContext = await browser.newContext();
+    const guestContext = await browser.newContext();
+
+    const hostPage = await hostContext.newPage();
+    const guestPage = await guestContext.newPage();
+
+    // Host creates room with exclusively "Memory Matrix" mode
+    await hostPage.goto('/create');
+    await hostPage.fill('#nickname', 'HostMemory');
+    await hostPage.click('button:has-text("Trivia Blitz")');
+    await hostPage.click('button:has-text("Speed Math")');
+    await hostPage.click('button:has-text("Reaction Clash")');
+    await hostPage.click('button:has-text("Rare Answer")');
+    await hostPage.click('[data-testid="create-room-submit-btn"]');
+    await expect(hostPage).toHaveURL(/\/lobby/);
+
+    const roomCodeElement = hostPage.locator('[data-testid="room-code-display"]');
+    await expect(roomCodeElement).toBeVisible();
+    const roomCode = await roomCodeElement.getAttribute('data-room-code');
+
+    // Guest joins
+    await guestPage.goto('/join');
+    await guestPage.fill('#roomCode', roomCode!);
+    await guestPage.fill('#join-nickname', 'GuestMemory');
+    await guestPage.click('[data-testid="join-room-submit-btn"]');
+    await expect(guestPage).toHaveURL(/\/lobby/);
+
+    const startMatchBtn = hostPage.locator('[data-testid="start-match-btn"]');
+    await expect(startMatchBtn).toBeEnabled();
+    await startMatchBtn.click();
+
+    // Both arrive at /game
+    await Promise.all([
+      hostPage.waitForURL(/\/game/, { timeout: 15000 }),
+      guestPage.waitForURL(/\/game/, { timeout: 15000 }),
+    ]);
+
+    // Visibly verify Memorize phase appears
+    const hostMemorizeHeading = hostPage.locator('h2:has-text("Memorize this sequence")');
+    const guestMemorizeHeading = guestPage.locator('h2:has-text("Memorize this sequence")');
+    await expect(hostMemorizeHeading).toBeVisible({ timeout: 10000 });
+    await expect(guestMemorizeHeading).toBeVisible({ timeout: 10000 });
+
+    // Verify lock warning is shown during Memorize
+    await expect(hostPage.getByText('Input disabled during server viewing phase')).toBeVisible();
+    await expect(guestPage.getByText('Input disabled during server viewing phase')).toBeVisible();
+
+    // Verify symbol buttons are strictly disabled during Memorize
+    const hostStarBtn = hostPage.locator('button:has-text("Star")');
+    const guestStarBtn = guestPage.locator('button:has-text("Star")');
+    await expect(hostStarBtn).toBeDisabled();
+    await expect(guestStarBtn).toBeDisabled();
+
+    // Verify sequence cards with #1 are visible
+    await expect(hostPage.locator('text=#1').first()).toBeVisible();
+    await expect(guestPage.locator('text=#1').first()).toBeVisible();
+
+    // Visibly verify transition to Recall phase after viewing period ends
+    const hostRecallHeading = hostPage.locator('h2:has-text("Repeat the sequence in order.")');
+    const guestRecallHeading = guestPage.locator('h2:has-text("Repeat the sequence in order.")');
+    await expect(hostRecallHeading).toBeVisible({ timeout: 10000 });
+    await expect(guestRecallHeading).toBeVisible({ timeout: 10000 });
+
+    // In Recall: symbol buttons become enabled!
+    await expect(hostStarBtn).toBeEnabled();
+    await expect(guestStarBtn).toBeEnabled();
+
+    // Empty slots appear
+    await expect(hostPage.getByText('Empty').first()).toBeVisible();
+
+    // Host clicks Star symbol and slot is filled
+    await hostStarBtn.click();
+    await expect(hostPage.locator('text=Progress: 1').first()).toBeVisible();
+
+    await hostContext.close();
+    await guestContext.close();
+  });
 });

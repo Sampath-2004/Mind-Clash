@@ -515,6 +515,8 @@ export class GameEngine {
           id: memory.id,
           symbols: memory.symbols,
           sequence: memory.sequence,
+          sequenceLength: memory.sequence?.length || memory.sequenceLength || 5,
+          phase: 'memorize',
           viewingDurationMs: memory.viewingDurationMs,
           inputDurationMs: memory.inputDurationMs,
           viewingEndTime: memory.viewingEndTime,
@@ -562,6 +564,8 @@ export class GameEngine {
           targetActivationTime: rx.targetActivationTime,
           timeoutMs: rx.timeoutMs,
           networkNotice: rx.networkNotice,
+          hasDistractor: rx.hasDistractor,
+          distractorDelayMs: rx.distractorDelayMs,
         },
       };
     }
@@ -592,8 +596,59 @@ export class GameEngine {
     });
     this.io.to(room.roomCode).emit('room_state_updated', this.sanitizeRoom(room));
 
-    // Schedule authoritative round timer with network latency buffer
-    this.scheduleTimer(room.roomCode, durationMs + NETWORK_LATENCY_BUFFER_MS, () => {
+    // For Memory mode: Schedule viewing timer first, then transition to recall phase
+    if (mode === 'memory') {
+      const memoryChallenge = secretChallenge.serverChallenge as MemoryChallengeServer;
+      this.scheduleTimer(room.roomCode, memoryChallenge.viewingDurationMs, () => {
+        this.transitionMemoryToRecall(room, roundId, memoryChallenge);
+      });
+    } else {
+      // Schedule authoritative round timer with network latency buffer
+      this.scheduleTimer(room.roomCode, durationMs + NETWORK_LATENCY_BUFFER_MS, () => {
+        this.endRound(room, roundId);
+      });
+    }
+  }
+
+  /**
+   * Authoritatively transitions Memory Matrix from the Memorize phase to the Recall phase.
+   * Removes sequence from the client-facing challenge to prevent cheating or reconnect leakage,
+   * starts the recall timer only after memorization ends, and broadcasts memory_phase_changed.
+   */
+  public transitionMemoryToRecall(
+    room: RoomState,
+    roundId: string,
+    memory: MemoryChallengeServer
+  ): void {
+    if (room.status !== 'ROUND_ACTIVE' || room.roundId !== roundId) {
+      return;
+    }
+
+    const currentClientChallenge = this.clientChallenges.get(room.roomCode);
+    const recallStartTime = Date.now();
+    const recallEndTime = recallStartTime + memory.inputDurationMs;
+
+    if (currentClientChallenge && currentClientChallenge.mode === 'memory') {
+      currentClientChallenge.challenge.phase = 'recall';
+      // Strip solution sequence from clientChallenge during recall
+      currentClientChallenge.challenge.sequence = undefined;
+      currentClientChallenge.challenge.recallStartTime = recallStartTime;
+      currentClientChallenge.challenge.recallEndTime = recallEndTime;
+    }
+
+    room.roundEndTime = recallEndTime;
+
+    this.io.to(room.roomCode).emit('memory_phase_changed', {
+      phase: 'recall',
+      roundId,
+      inputDurationMs: memory.inputDurationMs,
+      recallStartTime,
+      recallEndTime,
+      serverTime: recallStartTime,
+    });
+
+    // Schedule authoritative recall round timer with network latency buffer
+    this.scheduleTimer(room.roomCode, memory.inputDurationMs + NETWORK_LATENCY_BUFFER_MS, () => {
       this.endRound(room, roundId);
     });
   }
@@ -656,9 +711,12 @@ export class GameEngine {
       return { success: false, error: 'Answer already submitted for this round' };
     }
 
-    // Prevent early submission and replay exploits in Memory mode
-    if (secret?.mode === 'memory' && secret.serverChallenge.viewingEndTime) {
-      if (now < secret.serverChallenge.viewingEndTime) {
+    // Prevent early submission and replay exploits in Memory mode (strictly reject during Memorize phase)
+    if (secret?.mode === 'memory') {
+      const clientCh = this.clientChallenges.get(room.roomCode);
+      const isViewing = Boolean(secret.serverChallenge.viewingEndTime && now < secret.serverChallenge.viewingEndTime);
+      const isPhaseMemorize = clientCh?.mode === 'memory' && clientCh.challenge.phase === 'memorize';
+      if (isViewing || isPhaseMemorize) {
         return {
           success: false,
           error: 'Premature submission rejected: viewing period is still active',
@@ -1273,11 +1331,33 @@ export class GameEngine {
     const submittedPlayerIds = roomSubs ? Array.from(roomSubs.keys()) : [];
     const mySub = requestingPlayerId && roomSubs ? roomSubs.get(requestingPlayerId)?.textAnswer : undefined;
 
+    let activeChallenge =
+      room.status === 'ROUND_ACTIVE' || room.status === 'JUDGING_ANSWERS'
+        ? this.clientChallenges.get(room.roomCode)
+        : undefined;
+
+    // Security & fairness: In Memory mode, if recall phase is active, keep sequence OUT of reconnect snapshot!
+    if (activeChallenge && activeChallenge.mode === 'memory') {
+      const secret = this.secretChallenges.get(room.roomCode);
+      const viewingEnd =
+        secret?.mode === 'memory'
+          ? secret.serverChallenge.viewingEndTime
+          : activeChallenge.challenge.viewingEndTime;
+
+      if (now >= (viewingEnd || 0) || activeChallenge.challenge.phase === 'recall') {
+        activeChallenge = {
+          ...activeChallenge,
+          challenge: {
+            ...activeChallenge.challenge,
+            phase: 'recall',
+            sequence: undefined,
+          },
+        };
+      }
+    }
+
     return {
-      activeChallenge:
-        room.status === 'ROUND_ACTIVE' || room.status === 'JUDGING_ANSWERS'
-          ? this.clientChallenges.get(room.roomCode)
-          : undefined,
+      activeChallenge,
       remainingMs,
       roundRecap:
         room.status === 'ROUND_RECAP' ? this.lastRecaps.get(room.roomCode) : undefined,

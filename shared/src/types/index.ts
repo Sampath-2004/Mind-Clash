@@ -76,13 +76,19 @@ export interface MemorySymbol {
   colorClass: string;
 }
 
+export type MemoryPhase = 'memorize' | 'recall';
+
 export interface MemoryChallengeClient {
   id: string;
   symbols: MemorySymbol[]; // The symbol palette for reproduction
-  sequence: string[]; // Symbol IDs to memorize in order during viewing period
+  sequence?: string[]; // Symbol IDs to memorize in order during viewing period (omitted during recall)
+  phase?: MemoryPhase; // Explicit server-controlled phase: 'memorize' or 'recall'
   viewingDurationMs: number; // Server-controlled viewing period in ms
   inputDurationMs: number; // Reproduction time window
   viewingEndTime: number; // Authoritative server timestamp when viewing ends and input unlocks
+  recallStartTime?: number; // Server timestamp when recall phase starts
+  recallEndTime?: number; // Server timestamp when recall phase ends
+  sequenceLength?: number; // Number of symbols in the sequence (available in recall phase)
   gridSize?: number; // Backward compatibility
   pattern?: number[]; // Backward compatibility
   revealDurationMs?: number; // Backward compatibility
@@ -99,6 +105,8 @@ export interface ReactionChallengeClient {
   targetActivationTime: number; // Synchronized server timestamp when target activates
   timeoutMs: number;
   networkNotice: string; // Latency fairness disclosure
+  hasDistractor?: boolean; // Slight decision/impulse control distractor
+  distractorDelayMs?: number; // Time before target activation when distractor activates
 }
 
 export interface ReactionChallengeServer extends ReactionChallengeClient {

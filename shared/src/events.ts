@@ -166,6 +166,14 @@ export interface ServerToClientEvents {
     endTime: number;
     serverTime: number;
   }) => void;
+  memory_phase_changed: (data: {
+    phase: 'memorize' | 'recall';
+    roundId: string;
+    inputDurationMs?: number;
+    recallStartTime?: number;
+    recallEndTime?: number;
+    serverTime: number;
+  }) => void;
   submission_acknowledged: (data: { playerId: string }) => void;
   rare_answer_judging: (data: { prompt: string; roundNumber: number }) => void;
   round_voided: (data: { reason: string; replacementOffered: boolean }) => void;

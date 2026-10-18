@@ -278,6 +278,33 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setClockOffsetMs(data.serverTime - clientNow);
     }
 
+    function onMemoryPhaseChanged(data: {
+      phase: 'memorize' | 'recall';
+      roundId: string;
+      inputDurationMs?: number;
+      recallStartTime?: number;
+      recallEndTime?: number;
+      serverTime: number;
+    }) {
+      setActiveChallenge((prev) => {
+        if (!prev || prev.mode !== 'memory') return prev;
+        return {
+          ...prev,
+          challenge: {
+            ...prev.challenge,
+            phase: data.phase,
+            recallStartTime: data.recallStartTime,
+            recallEndTime: data.recallEndTime,
+            sequence: data.phase === 'recall' ? undefined : prev.challenge.sequence,
+          },
+        };
+      });
+      if (data.recallEndTime) {
+        setCurrentRoom((prev) => (prev ? { ...prev, roundEndTime: data.recallEndTime } : prev));
+      }
+      sounds.playTick(700);
+    }
+
     function onRoundRecap(recap: RoundRecapData) {
       setRoundRecap(recap);
       setIsJudging(false);
@@ -311,6 +338,7 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     socket.on('rare_answer_judging', onRareAnswerJudging);
     socket.on('round_voided', onRoundVoided);
     socket.on('round_started', onRoundStarted);
+    socket.on('memory_phase_changed', onMemoryPhaseChanged);
     socket.on('round_recap', onRoundRecap);
     socket.on('game_over', onGameOver);
     socket.on('kicked', onKicked);
@@ -332,6 +360,7 @@ export const GameStateProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       socket.off('rare_answer_judging', onRareAnswerJudging);
       socket.off('round_voided', onRoundVoided);
       socket.off('round_started', onRoundStarted);
+      socket.off('memory_phase_changed', onMemoryPhaseChanged);
       socket.off('round_recap', onRoundRecap);
       socket.off('game_over', onGameOver);
       socket.off('kicked', onKicked);

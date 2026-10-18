@@ -43,51 +43,95 @@ export function generateMathQuestion(
       };
     }
   } else if (difficulty === 'medium') {
-    // Medium: Multiplication, exact division, and simple multi-step work (progressive scaling)
-    const opType = roundNumber >= 4 ? 2 : crypto.randomInt(0, 3);
+    // Medium: Broader operand variety and multi-step arithmetic (multiplication, exact division, 2-step expressions)
+    // 5 diverse problem varieties:
+    // 0: Multiplication with extended operands (tables up to 15)
+    // 1: Exact division with larger dividends (up to 180)
+    // 2: Multi-step: (a × b) ± c
+    // 3: Multi-step: (dividend ÷ divisor) ± c
+    // 4: Combined multi-step: (a × b) + (dividend ÷ divisor)
+    // Late rounds (roundNumber >= 4) strictly scale to multi-step expressions
+    const opType = roundNumber >= 4 ? crypto.randomInt(2, 5) : crypto.randomInt(0, 5);
+
     if (opType === 0) {
-      // Multiplication times tables up to 12
-      const a = crypto.randomInt(4, 12);
-      const b = crypto.randomInt(4, 12);
+      // Extended multiplication with wider operand variety (e.g. 14 × 7, 13 × 8)
+      const a = crypto.randomInt(6, 16);
+      const b = crypto.randomInt(4, 13);
       const ans = a * b;
       problem = {
         prompt: `${a} × ${b} = ?`,
         correctAnswer: ans,
-        plausibleDistractors: [ans + a, ans - b, ans + 2, ans - 4, ans + 10],
+        plausibleDistractors: [ans + a, ans - b, ans + 10, ans - 10, (a + 1) * b],
       };
     } else if (opType === 1) {
-      // Exact division
-      const divisor = crypto.randomInt(3, 10);
-      const quotient = crypto.randomInt(4, 12);
+      // Exact division with larger dividends
+      const divisor = crypto.randomInt(4, 13);
+      const quotient = crypto.randomInt(6, 17);
       const dividend = divisor * quotient;
       problem = {
         prompt: `${dividend} ÷ ${divisor} = ?`,
         correctAnswer: quotient,
-        plausibleDistractors: [quotient + 1, quotient - 1, quotient + 2, quotient - 2],
+        plausibleDistractors: [quotient + 1, quotient - 1, quotient + 2, quotient - 2, quotient + 5],
       };
-    } else {
-      // Combined 2-step: (a × b) + c or (a × b) - c
+    } else if (opType === 2) {
+      // Combined 2-step: (a × b) + c or (a × b) - c with broader operands
       const isAdd = crypto.randomInt(0, 2) === 0;
-      const a = crypto.randomInt(4, 9);
-      const b = crypto.randomInt(3, 8);
+      const a = crypto.randomInt(5, 13);
+      const b = crypto.randomInt(4, 11);
+      const prod = a * b;
       if (isAdd) {
-        const c = crypto.randomInt(5, 25);
-        const ans = a * b + c;
+        const c = crypto.randomInt(7, 36);
+        const ans = prod + c;
         problem = {
           prompt: `(${a} × ${b}) + ${c} = ?`,
           correctAnswer: ans,
-          plausibleDistractors: [a * (b + c), a * b + c + 10, a * b + c - 2, ans + 4],
+          plausibleDistractors: [a * (b + c), prod + c + 10, prod + c - 10, ans + 4, ans - 6],
         };
       } else {
-        const prod = a * b;
-        const c = crypto.randomInt(1, Math.max(2, prod - 3));
+        const c = crypto.randomInt(3, Math.max(4, prod - 5));
         const ans = prod - c;
         problem = {
           prompt: `(${a} × ${b}) - ${c} = ?`,
           correctAnswer: ans,
-          plausibleDistractors: [ans + 10, ans - 10, ans + c, ans - 2],
+          plausibleDistractors: [ans + 10, ans - 10, ans + c, ans - 4, ans + 6],
         };
       }
+    } else if (opType === 3) {
+      // Multi-step exact division with offset: (dividend ÷ divisor) ± c
+      const divisor = crypto.randomInt(3, 11);
+      const quotient = crypto.randomInt(7, 21);
+      const dividend = divisor * quotient;
+      const isAdd = crypto.randomInt(0, 2) === 0;
+      if (isAdd) {
+        const c = crypto.randomInt(6, 28);
+        const ans = quotient + c;
+        problem = {
+          prompt: `(${dividend} ÷ ${divisor}) + ${c} = ?`,
+          correctAnswer: ans,
+          plausibleDistractors: [ans + 10, ans - 10, quotient + c + 2, quotient * c, ans - 3],
+        };
+      } else {
+        const c = crypto.randomInt(2, Math.max(3, quotient - 2));
+        const ans = quotient - c;
+        problem = {
+          prompt: `(${dividend} ÷ ${divisor}) - ${c} = ?`,
+          correctAnswer: ans,
+          plausibleDistractors: [ans + 10, ans - 10, quotient + c, ans + 2, ans - 2],
+        };
+      }
+    } else {
+      // Combined multi-step: (a × b) + (dividend ÷ divisor)
+      const a = crypto.randomInt(4, 10);
+      const b = crypto.randomInt(3, 8);
+      const divDivisor = crypto.randomInt(3, 8);
+      const divQuotient = crypto.randomInt(3, 10);
+      const divDividend = divDivisor * divQuotient;
+      const ans = a * b + divQuotient;
+      problem = {
+        prompt: `(${a} × ${b}) + (${divDividend} ÷ ${divDivisor}) = ?`,
+        correctAnswer: ans,
+        plausibleDistractors: [ans + 10, ans - 10, a * b + divDividend, ans + 2, ans - 4],
+      };
     }
   } else {
     // Hard: Larger values, multi-step expressions, and nested operations

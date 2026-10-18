@@ -20,12 +20,14 @@ export const ReactionView: React.FC<ReactionViewProps> = ({
   const { clockOffsetMs } = useGame();
   const [state, setState] = useState<'waiting' | 'ready' | 'clicked' | 'false_start'>('waiting');
   const [reactionMs, setReactionMs] = useState<number | null>(null);
+  const [isDistractorActive, setIsDistractorActive] = useState<boolean>(false);
   const activationTimeRef = useRef<number | null>(null);
 
   // Synchronized target activation using server-provided timestamp and clock offset
   useEffect(() => {
     setState('waiting');
     setReactionMs(null);
+    setIsDistractorActive(false);
 
     const serverTargetTime =
       challenge.targetActivationTime ||
@@ -36,13 +38,32 @@ export const ReactionView: React.FC<ReactionViewProps> = ({
     const estimatedNow = Date.now() + clockOffsetMs;
     const delay = Math.max(0, serverTargetTime - estimatedNow);
 
+    let distractorTimer: ReturnType<typeof setTimeout> | undefined;
+    let distractorEndTimer: ReturnType<typeof setTimeout> | undefined;
+
+    // Optional impulse distractor cue scheduled before target activation
+    if (challenge.hasDistractor && challenge.distractorDelayMs && challenge.distractorDelayMs < delay) {
+      distractorTimer = setTimeout(() => {
+        setIsDistractorActive(true);
+        sounds.playTick(500);
+        distractorEndTimer = setTimeout(() => {
+          setIsDistractorActive(false);
+        }, 550);
+      }, challenge.distractorDelayMs);
+    }
+
     const timer = setTimeout(() => {
+      setIsDistractorActive(false);
       setState('ready');
       sounds.playReactionTrigger();
     }, delay);
 
-    return () => clearTimeout(timer);
-  }, [challenge.id, challenge.targetActivationTime, challenge.waitDelayMs, clockOffsetMs]);
+    return () => {
+      clearTimeout(timer);
+      if (distractorTimer) clearTimeout(distractorTimer);
+      if (distractorEndTimer) clearTimeout(distractorEndTimer);
+    };
+  }, [challenge.id, challenge.targetActivationTime, challenge.waitDelayMs, challenge.hasDistractor, challenge.distractorDelayMs, clockOffsetMs]);
 
   const handleStrike = () => {
     if (disabled || state === 'clicked' || state === 'false_start') return;
@@ -101,7 +122,9 @@ export const ReactionView: React.FC<ReactionViewProps> = ({
         aria-label="Reaction trigger pad"
         className={`w-full aspect-[4/3] sm:aspect-[16/9] rounded-3xl p-8 flex flex-col items-center justify-center text-center transition-all duration-100 select-none border-4 shadow-2xl focus:outline-none focus-visible:ring-4 ${
           state === 'waiting'
-            ? 'bg-rose-950/40 border-dashed border-rose-500/50 text-rose-200 cursor-pointer active:scale-98'
+            ? isDistractorActive
+              ? 'bg-amber-950/60 border-solid border-amber-400 text-amber-200 cursor-pointer animate-pulse'
+              : 'bg-rose-950/40 border-dashed border-rose-500/50 text-rose-200 cursor-pointer active:scale-98'
             : state === 'ready'
             ? 'bg-emerald-500 border-solid border-emerald-300 text-slate-950 shadow-emerald-500/60 scale-102 cursor-pointer animate-pulse motion-reduce:animate-none'
             : state === 'false_start'
@@ -111,19 +134,33 @@ export const ReactionView: React.FC<ReactionViewProps> = ({
       >
         {state === 'waiting' && (
           <div className="space-y-4 max-w-sm mx-auto">
-            <div className="w-20 h-20 mx-auto rounded-full bg-rose-500/20 border-2 border-rose-500/40 flex items-center justify-center animate-pulse motion-reduce:animate-none">
-              <Clock className="w-10 h-10 text-rose-400" />
+            <div className={`w-20 h-20 mx-auto rounded-full border-2 flex items-center justify-center animate-pulse motion-reduce:animate-none ${
+              isDistractorActive
+                ? 'bg-amber-500/30 border-amber-400 text-amber-300'
+                : 'bg-rose-500/20 border-rose-500/40 text-rose-400'
+            }`}>
+              {isDistractorActive ? (
+                <ShieldAlert className="w-10 h-10 text-amber-400" />
+              ) : (
+                <Clock className="w-10 h-10 text-rose-400" />
+              )}
             </div>
             <div className="space-y-1">
-              <span className="text-[11px] font-mono font-bold uppercase tracking-widest text-rose-400 block">
-                [SHARED WAITING SCREEN]
+              <span className={`text-[11px] font-mono font-bold uppercase tracking-widest block ${
+                isDistractorActive ? 'text-amber-400' : 'text-rose-400'
+              }`}>
+                {isDistractorActive ? '[HOLD YOUR HORSES!]' : '[SHARED WAITING SCREEN]'}
               </span>
               <h2 className="text-2xl sm:text-4xl font-black uppercase tracking-wider text-white">
-                WAIT FOR SIGNAL
+                {isDistractorActive ? 'STEADY... NOT YET!' : 'WAIT FOR SIGNAL'}
               </h2>
             </div>
-            <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-xs text-rose-300 font-semibold flex items-center justify-center gap-1.5">
-              <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+            <div className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 ${
+              isDistractorActive
+                ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+                : 'bg-rose-500/10 border-rose-500/20 text-rose-300'
+            }`}>
+              <ShieldAlert className="w-4 h-4 shrink-0" />
               <span>DO NOT TAP EARLY (-200 pts false start penalty)</span>
             </div>
           </div>

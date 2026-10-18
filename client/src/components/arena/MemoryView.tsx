@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Eye, CheckCircle2, RotateCcw, Lock, ArrowRight, ShieldCheck } from 'lucide-react';
 import { MemoryChallengeClient, MemorySymbol } from '@mind-clash/shared';
 import { sounds } from '../../audio/soundEffects';
+import { useGame } from '../../context/GameStateContext';
 
 const DEFAULT_SYMBOLS: MemorySymbol[] = [
   { id: 'star', label: 'Star', icon: '⭐', colorClass: 'text-amber-400 border-amber-400/50 bg-amber-500/10' },
@@ -27,44 +28,70 @@ export const MemoryView: React.FC<MemoryViewProps> = ({
   onSubmitTiles,
   disabled = false,
 }) => {
-  const [phase, setPhase] = useState<'viewing' | 'reproduce'>('viewing');
+  const { clockOffsetMs } = useGame();
+
+  // Explicit server-controlled phases: 'memorize' vs 'recall'
+  // If reconnecting during Recall, start directly in 'recall' to prevent restarting preview
+  const isInitialRecall = challenge.phase === 'recall';
+  const [phase, setPhase] = useState<'memorize' | 'recall'>(isInitialRecall ? 'recall' : 'memorize');
   const [userSequence, setUserSequence] = useState<string[]>([]);
   const [isLocked, setIsLocked] = useState(false);
-  const [viewingSecondsLeft, setViewingSecondsLeft] = useState<number>(3);
+  const [viewingSecondsLeft, setViewingSecondsLeft] = useState<number>(() => {
+    const dur = challenge.viewingDurationMs || challenge.revealDurationMs || 3000;
+    return Math.max(1, Math.ceil(dur / 1000));
+  });
+
+  // Cached reference to the sequence received during Memorize
+  const memorizedSeqRef = useRef<string[]>(challenge.sequence || []);
+  if (challenge.sequence && challenge.sequence.length > 0) {
+    memorizedSeqRef.current = challenge.sequence;
+  }
 
   const symbols = challenge.symbols && challenge.symbols.length > 0 ? challenge.symbols : DEFAULT_SYMBOLS;
-  const targetSequence = challenge.sequence && challenge.sequence.length > 0 ? challenge.sequence : ['star', 'bolt', 'shield', 'diamond'];
-  const targetLength = targetSequence.length;
+  const targetLength =
+    challenge.sequenceLength ||
+    challenge.sequence?.length ||
+    memorizedSeqRef.current.length ||
+    5;
 
   // Server-synchronized viewing period timer
   useEffect(() => {
-    setPhase('viewing');
+    // If challenge is explicitly in recall phase, enter recall and do NOT restart preview
+    if (challenge.phase === 'recall') {
+      setPhase('recall');
+      return;
+    }
+
+    // Entering Memorize phase
+    setPhase('memorize');
     setUserSequence([]);
     setIsLocked(false);
 
     const viewingDuration = challenge.viewingDurationMs || challenge.revealDurationMs || 3000;
-    const startTime = Date.now();
-    const endTime = challenge.viewingEndTime || startTime + viewingDuration;
+    const endTime = challenge.viewingEndTime || (Date.now() + clockOffsetMs + viewingDuration);
 
-    const interval = setInterval(() => {
-      const now = Date.now();
-      const remainingMs = Math.max(0, endTime - now);
-      const secs = Math.ceil(remainingMs / 1000);
+    const updateViewingCountdown = () => {
+      const estimatedNow = Date.now() + clockOffsetMs;
+      const remainingMs = Math.max(0, endTime - estimatedNow);
+      const secs = Math.max(1, Math.ceil(remainingMs / 1000));
       setViewingSecondsLeft(secs);
 
-      if (remainingMs <= 0) {
-        clearInterval(interval);
-        setPhase('reproduce');
+      // Transition to recall when server confirms phase or viewing time has completed
+      if (remainingMs <= 0 || challenge.phase === 'recall') {
+        setPhase('recall');
         sounds.playTick(700);
       }
-    }, 100);
+    };
+
+    updateViewingCountdown();
+    const interval = setInterval(updateViewingCountdown, 100);
 
     return () => clearInterval(interval);
-  }, [challenge.id, challenge.viewingEndTime, challenge.viewingDurationMs, challenge.revealDurationMs]);
+  }, [challenge.id, challenge.phase, challenge.viewingEndTime, challenge.viewingDurationMs, challenge.revealDurationMs, clockOffsetMs]);
 
-  // Handle symbol selection during reproduce phase
+  // Handle symbol selection during recall phase
   const handleSelectSymbol = (symbolId: string) => {
-    if (phase !== 'reproduce' || disabled || isLocked) return;
+    if (phase !== 'recall' || disabled || isLocked) return;
     if (userSequence.length >= targetLength) return;
 
     sounds.playClick();
@@ -73,21 +100,21 @@ export const MemoryView: React.FC<MemoryViewProps> = ({
 
   // Remove the last selected symbol (undo)
   const handleUndo = () => {
-    if (phase !== 'reproduce' || disabled || isLocked || userSequence.length === 0) return;
+    if (phase !== 'recall' || disabled || isLocked || userSequence.length === 0) return;
     sounds.playClick();
     setUserSequence((prev) => prev.slice(0, -1));
   };
 
   // Clear all selections
   const handleClear = () => {
-    if (phase !== 'reproduce' || disabled || isLocked || userSequence.length === 0) return;
+    if (phase !== 'recall' || disabled || isLocked || userSequence.length === 0) return;
     sounds.playClick();
     setUserSequence([]);
   };
 
   // Lock in / Submit sequence
   const handleLockIn = () => {
-    if (isLocked || disabled || phase !== 'reproduce' || userSequence.length === 0) return;
+    if (isLocked || disabled || phase !== 'recall' || userSequence.length === 0) return;
     setIsLocked(true);
     sounds.playSuccess();
 
@@ -103,7 +130,7 @@ export const MemoryView: React.FC<MemoryViewProps> = ({
   // Keyboard shortcut support (1-6 for symbol choices, Backspace for undo, Enter to lock in)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (phase !== 'reproduce' || disabled || isLocked) return;
+      if (phase !== 'recall' || disabled || isLocked) return;
 
       const num = parseInt(e.key, 10);
       if (!isNaN(num) && num >= 1 && num <= symbols.length) {
@@ -121,6 +148,13 @@ export const MemoryView: React.FC<MemoryViewProps> = ({
 
   const getSymbol = (id: string) => symbols.find((s) => s.id === id) || { id, label: id, icon: '❓', colorClass: '' };
 
+  const displaySequence =
+    challenge.sequence && challenge.sequence.length > 0
+      ? challenge.sequence
+      : memorizedSeqRef.current.length > 0
+      ? memorizedSeqRef.current
+      : ['star', 'bolt', 'shield', 'diamond', 'moon'];
+
   return (
     <div className="w-full max-w-2xl mx-auto space-y-6 animate-fade-in motion-reduce:animate-none">
       {/* Header Info & Accessible Text Cue */}
@@ -131,17 +165,17 @@ export const MemoryView: React.FC<MemoryViewProps> = ({
         </span>
         <span
           className={`font-bold uppercase tracking-wider flex items-center gap-1.5 px-3 py-1 rounded-full text-xs ${
-            phase === 'viewing'
+            phase === 'memorize'
               ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse'
               : 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20'
           }`}
         >
-          {phase === 'viewing' ? (
+          {phase === 'memorize' ? (
             <>
-              <Eye className="w-3.5 h-3.5" /> Memorize Order ({viewingSecondsLeft}s)
+              <Eye className="w-3.5 h-3.5" /> Memorize Sequence ({viewingSecondsLeft}s)
             </>
           ) : (
-            <>Reproduce {targetLength} Symbols in Order</>
+            <>Repeat {targetLength} Symbols in Order</>
           )}
         </span>
       </div>
@@ -153,10 +187,10 @@ export const MemoryView: React.FC<MemoryViewProps> = ({
         {/* Phase Instructions */}
         <div className="text-center space-y-1">
           <h2 className="text-lg sm:text-xl font-black text-white">
-            {phase === 'viewing' ? 'Memorize This Exact Sequence' : 'Tap the Symbols in Order'}
+            {phase === 'memorize' ? 'Memorize this sequence' : 'Repeat the sequence in order.'}
           </h2>
           <p className="text-xs text-slate-400">
-            {phase === 'viewing'
+            {phase === 'memorize'
               ? 'All players view the same sequence. Input unlocks simultaneously.'
               : 'Reproduce the sequence from memory. Both symbol and order count!'}
           </p>
@@ -164,9 +198,9 @@ export const MemoryView: React.FC<MemoryViewProps> = ({
 
         {/* Sequence Display Area */}
         <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3 py-4 min-h-[100px]">
-          {phase === 'viewing' ? (
-            // VIEWING PHASE: Show target sequence with numbers, icons, and text labels
-            targetSequence.map((symbolId, idx) => {
+          {phase === 'memorize' ? (
+            // MEMORIZE PHASE: Show target sequence with numbers, icons, and text labels
+            displaySequence.map((symbolId, idx) => {
               const sym = getSymbol(symbolId);
               return (
                 <div
@@ -180,7 +214,7 @@ export const MemoryView: React.FC<MemoryViewProps> = ({
               );
             })
           ) : (
-            // REPRODUCE PHASE: Show user filled slots
+            // RECALL PHASE: Show user filled slots
             Array.from({ length: targetLength }).map((_, idx) => {
               const symbolId = userSequence[idx];
               const sym = symbolId ? getSymbol(symbolId) : null;
@@ -210,7 +244,7 @@ export const MemoryView: React.FC<MemoryViewProps> = ({
         </div>
 
         {/* Phase State & Sequence Controls */}
-        {phase === 'viewing' ? (
+        {phase === 'memorize' ? (
           <div className="flex items-center justify-center gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 font-medium">
             <Lock className="w-4 h-4 text-amber-400" />
             <span>Input disabled during server viewing phase ({viewingSecondsLeft}s remaining)</span>
@@ -265,9 +299,9 @@ export const MemoryView: React.FC<MemoryViewProps> = ({
                 key={sym.id}
                 type="button"
                 onClick={() => handleSelectSymbol(sym.id)}
-                disabled={phase !== 'reproduce' || disabled || isLocked || isFull}
+                disabled={phase !== 'recall' || disabled || isLocked || isFull}
                 className={`p-3 rounded-2xl border-2 flex flex-col items-center justify-center gap-1.5 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 active:scale-95 ${
-                  phase === 'reproduce' && !isLocked && !disabled && !isFull
+                  phase === 'recall' && !isLocked && !disabled && !isFull
                     ? 'bg-slate-900/80 border-white/15 hover:border-cyan-400 hover:bg-slate-800 text-white cursor-pointer shadow-lg'
                     : 'bg-slate-950/40 border-white/5 text-slate-600 cursor-not-allowed opacity-50'
                 }`}
@@ -282,7 +316,7 @@ export const MemoryView: React.FC<MemoryViewProps> = ({
       </div>
 
       {/* Submission Button */}
-      {phase === 'reproduce' && (
+      {phase === 'recall' && (
         <div className="flex justify-end pt-2">
           <button
             type="button"

@@ -35,8 +35,8 @@ export function generateMemoryChallenge(
     gridSize = 3;
     patternCount = 3;
   } else if (difficulty === 'medium') {
-    // Medium: balanced recall challenge
-    seqLength = roundNumber <= 2 ? 4 : 5;
+    // Medium: balanced recall challenge (increased by 1 symbol, capped at 8)
+    seqLength = Math.min(8, roundNumber <= 2 ? 5 : 6);
     viewingDurationMs = 3000;
     inputDurationMs = MEMORY_INPUT_DURATION_MS;
     gridSize = roundNumber >= 4 ? 4 : 3;
@@ -53,6 +53,7 @@ export function generateMemoryChallenge(
   const sequence: string[] = [];
   const symbolIds = MEMORY_SYMBOLS.map((s) => s.id);
 
+  // Allow repeated symbols selected with uniform randomness
   for (let i = 0; i < seqLength; i++) {
     const randomSymbol = symbolIds[crypto.randomInt(0, symbolIds.length)];
     sequence.push(randomSymbol);
@@ -72,6 +73,8 @@ export function generateMemoryChallenge(
     id: `mem-${difficulty}-r${roundNumber}-${Date.now()}-${crypto.randomInt(100, 999)}`,
     symbols: MEMORY_SYMBOLS,
     sequence,
+    sequenceLength: sequence.length,
+    phase: 'memorize',
     solutionSequence: sequence,
     viewingDurationMs,
     inputDurationMs,

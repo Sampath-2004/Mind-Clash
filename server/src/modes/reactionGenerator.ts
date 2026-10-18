@@ -23,9 +23,10 @@ export function generateReactionChallenge(
     maxDelay = 3800;
     timeoutMs = 5000; // Generous reflex window
   } else if (difficulty === 'medium') {
+    // Medium: Slightly wider unpredictable delay (2.0s - 5.5s) testing patience and impulse control
     minDelay = REACTION_MIN_DELAY_MS;
-    maxDelay = REACTION_MAX_DELAY_MS;
-    timeoutMs = REACTION_TIMEOUT_MS; // Standard reflex window
+    maxDelay = REACTION_MAX_DELAY_MS + 500;
+    timeoutMs = REACTION_TIMEOUT_MS; // 4,000ms: comfortably above network ping latency (100-300ms)
   } else {
     // Hard: Wide unpredictable wait delay window (1.5s - 6.2s) heavily testing impulse control
     minDelay = 1500;
@@ -37,6 +38,10 @@ export function generateReactionChallenge(
   const waitDelayMs = crypto.randomInt(minDelay, maxDelay + 1);
   const targetActivationTime = startTime + waitDelayMs;
 
+  // Medium and Hard support an optional impulse distractor cue before activation
+  const hasDistractor = difficulty === 'medium' ? crypto.randomInt(0, 2) === 1 : difficulty === 'hard';
+  const distractorDelayMs = hasDistractor ? Math.floor(waitDelayMs * 0.45) : undefined;
+
   return {
     id: `rx-${difficulty}-${Date.now()}-${crypto.randomInt(100, 999)}`,
     waitDelayMs,
@@ -44,5 +49,7 @@ export function generateReactionChallenge(
     timeoutMs,
     triggerTimestamp: targetActivationTime,
     networkNotice: REACTION_NETWORK_NOTICE,
+    hasDistractor,
+    distractorDelayMs,
   };
 }

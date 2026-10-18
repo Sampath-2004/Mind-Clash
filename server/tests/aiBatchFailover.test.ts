@@ -17,8 +17,7 @@ import {
   ServerResponseAck,
   ActiveChallengeClient,
 } from '@mind-clash/shared';
-import { TRIVIA_BANK, getQuestionDifficulty } from '../src/modes/triviaBank.js';
-import { duplicatePrevention } from '../src/services/duplicatePrevention.js';
+import { TRIVIA_BANK } from '../src/modes/triviaBank.js';
 
 type TestSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
